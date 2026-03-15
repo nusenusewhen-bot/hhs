@@ -223,29 +223,45 @@ bot.on('interactionCreate', async interaction => {
         );
 
         const row2 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('toggle').setLabel(user.status === 'running' ? '⏹️ Stop' : '▶️ Start').setStyle(user.status === 'running' ? ButtonStyle.Danger : ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('reset_tickets').setLabel('🔄 Reset Tickets').setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder()
+                .setCustomId('start')
+                .setLabel('▶️ Start')
+                .setStyle(ButtonStyle.Success)
+                .setDisabled(user.status === 'running'),
+            new ButtonBuilder()
+                .setCustomId('stop')
+                .setLabel('⏹️ Stop')
+                .setStyle(ButtonStyle.Danger)
+                .setDisabled(user.status === 'stopped'),
+            new ButtonBuilder()
+                .setCustomId('reset_tickets')
+                .setLabel('🔄 Reset')
+                .setStyle(ButtonStyle.Secondary)
         );
 
         await interaction.reply({ embeds: [embed], components: [row1, row2], ephemeral: true });
     }
 
     if (interaction.isButton()) {
-        if (interaction.customId === 'toggle') {
+        if (interaction.customId === 'start') {
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-            const isRunning = user.status === 'running';
+            if (user.status === 'running') return interaction.reply({ content: 'Already running', ephemeral: true });
             
-            if (isRunning) {
-                const sb = activeSelfbots.get(interaction.user.id);
-                if (sb) sb.stop();
-                activeSelfbots.delete(interaction.user.id);
-                await interaction.update({ content: '⏹️ Stopped', embeds: [], components: [] });
-            } else {
-                const newSb = new UserSelfbot(interaction.user.id, user);
-                activeSelfbots.set(interaction.user.id, newSb);
-                newSb.start();
-                await interaction.update({ content: '▶️ Started', embeds: [], components: [] });
-            }
+            const newSb = new UserSelfbot(interaction.user.id, user);
+            activeSelfbots.set(interaction.user.id, newSb);
+            newSb.start();
+            await interaction.update({ content: '▶️ Started', embeds: [], components: [] });
+            return;
+        }
+
+        if (interaction.customId === 'stop') {
+            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
+            if (user.status === 'stopped') return interaction.reply({ content: 'Already stopped', ephemeral: true });
+            
+            const sb = activeSelfbots.get(interaction.user.id);
+            if (sb) sb.stop();
+            activeSelfbots.delete(interaction.user.id);
+            await interaction.update({ content: '⏹️ Stopped', embeds: [], components: [] });
             return;
         }
 
