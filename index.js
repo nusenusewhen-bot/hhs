@@ -8,7 +8,7 @@ const OWNER_ID = '1422945082746601594';
 const db = new Database('./data.db');
 db.exec(`
     CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, created_at INTEGER, redeemed_by TEXT, redeemed_at INTEGER);
-    CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, token TEXT, claim_cmd TEXT DEFAULT '.claim', guild_ids TEXT, category_ids TEXT, status TEXT DEFAULT 'stopped', claimed_tickets TEXT DEFAULT '[]', allowed_users TEXT DEFAULT '[]');
+    CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, token TEXT, claim_cmd TEXT DEFAULT '.claim', guild_ids TEXT, category_ids TEXT, status TEXT DEFAULT 'stopped', claimed_tickets TEXT DEFAULT '[]');
 `);
 
 const bot = new BotClient({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages] });
@@ -23,7 +23,6 @@ class UserSelfbot {
         this.isRunning = config.status === 'running';
         this.isReady = false;
         this.claimedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
-        this.allowedUsers = new Set(JSON.parse(config.allowed_users || '[]'));
         
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
@@ -41,10 +40,6 @@ class UserSelfbot {
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run(this.isRunning ? 'running' : 'stopped', this.userId);
     }
 
-    saveAllowedUsers() {
-        db.prepare('UPDATE users SET allowed_users = ? WHERE user_id = ?').run(JSON.stringify([...this.allowedUsers]), this.userId);
-    }
-
     shouldMonitor(channel) {
         if (!this.guildIds.includes(channel.guildId)) return false;
         if (this.categoryIds.length === 0) return true;
@@ -52,8 +47,8 @@ class UserSelfbot {
     }
 
     canUseCommands(userId) {
-        // Selfbot token owner OR configured allowed users
-        return this.allowedUsers.has(userId) || userId === this.client?.user?.id;
+        // Configurer (this.userId) OR selfbot token owner
+        return userId === this.userId || userId === this.client?.user?.id;
     }
 
     async start() {
@@ -82,11 +77,7 @@ class UserSelfbot {
 
         this.client.once('ready', () => {
             this.isReady = true;
-            console.log(`[READY] ${this.userId} as ${this.client.user.tag} (${this.client.user.id})`);
-            
-            // Add selfbot user to allowed list
-            this.allowedUsers.add(this.client.user.id);
-            this.saveAllowedUsers();
+            console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
@@ -112,7 +103,6 @@ class UserSelfbot {
                 
                 if (this.isRunning) {
                     const delay = this.randomDelay();
-                    console.log(`[CLAIM] Will claim #${channel.name} in ${delay}ms`);
                     setTimeout(() => this.claim(channel), delay);
                 }
             });
@@ -144,19 +134,15 @@ class UserSelfbot {
         this.client.on('messageCreate', async (msg) => {
             if (msg.channelId !== channel.id) return;
             
-            // Check if user can use commands
-            const canUse = this.canUseCommands(msg.author.id);
-            
             // Detect claims from anyone
             if (msg.content === this.config.claim_cmd && !this.claimedChannels.has(channel.id)) {
                 this.claimedChannels.add(channel.id);
                 this.saveClaimed();
-                console.log(`[DETECTED] Claim in #${channel.name} by ${msg.author.tag}`);
                 return;
             }
 
-            // Command handling - only allowed users
-            if (!canUse) return;
+            // Commands only for configurer or selfbot owner
+            if (!this.canUseCommands(msg.author.id)) return;
             
             if (msg.content === '.stop') {
                 if (!this.isRunning) {
@@ -165,7 +151,7 @@ class UserSelfbot {
                 }
                 this.isRunning = false;
                 this.saveStatus();
-                console.log(`[CMD] .stop by ${msg.author.tag} in #${channel.name}`);
+                console.log(`[CMD] .stop by ${msg.author.tag}`);
                 setTimeout(() => msg.channel.send('⏹️ Stopped').catch(() => {}), 3000);
                 return;
             }
@@ -177,7 +163,7 @@ class UserSelfbot {
                 }
                 this.isRunning = true;
                 this.saveStatus();
-                console.log(`[CMD] .start by ${msg.author.tag} in #${channel.name}`);
+                console.log(`[CMD] .start by ${msg.author.tag}`);
                 setTimeout(() => msg.channel.send('▶️ Started').catch(() => {}), 3000);
                 
                 if (!this.claimedChannels.has(channel.id)) {
@@ -228,23 +214,16 @@ class UserSelfbot {
     }
 
     updateFromDB() {
-        const user = db.prepare('SELECT status, allowed_users FROM users WHERE user_id = ?').get(this.userId);
+        const user = db.prepare('SELECT status FROM users WHERE user_id = ?').get(this.userId);
         if (!user) return false;
         
         const shouldRun = user.status === 'running';
-        let changed = false;
-        
         if (shouldRun !== this.isRunning) {
             this.isRunning = shouldRun;
-            changed = true;
-            console.log(`[SYNC] ${this.userId} status -> ${shouldRun ? 'running' : 'stopped'}`);
+            console.log(`[SYNC] ${this.userId} -> ${shouldRun ? 'running' : 'stopped'}`);
+            return true;
         }
-        
-        // Update allowed users from DB
-        const dbAllowed = new Set(JSON.parse(user.allowed_users || '[]'));
-        this.allowedUsers = dbAllowed;
-        
-        return changed;
+        return false;
     }
 }
 
@@ -264,13 +243,7 @@ bot.on('interactionCreate', async interaction => {
         if (!keyData) return interaction.reply({ content: '❌ Invalid key', ephemeral: true });
         if (keyData.redeemed_by) return interaction.reply({ content: '❌ Already redeemed', ephemeral: true });
         db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
-        
-        // Add redeemer to allowed users
-        const existing = db.prepare('SELECT allowed_users FROM users WHERE user_id = ?').get(interaction.user.id);
-        let allowed = existing ? JSON.parse(existing.allowed_users || '[]') : [];
-        allowed.push(interaction.user.id);
-        db.prepare('INSERT OR REPLACE INTO users (user_id, allowed_users) VALUES (?, ?)').run(interaction.user.id, JSON.stringify(allowed));
-        
+        db.prepare('INSERT OR REPLACE INTO users (user_id) VALUES (?)').run(interaction.user.id);
         await interaction.reply({ content: '✅ Redeemed! Use `/manage`', ephemeral: true });
     }
 
@@ -304,7 +277,6 @@ bot.on('interactionCreate', async interaction => {
         const isActuallyRunning = sb ? sb.isRunning && sb.isReady : false;
         
         const claimed = JSON.parse(user.claimed_tickets || '[]').length;
-        const allowed = JSON.parse(user.allowed_users || '[]');
         
         const embed = new EmbedBuilder()
             .setTitle('🤖 Selfbot Control')
@@ -312,8 +284,9 @@ bot.on('interactionCreate', async interaction => {
                 { name: 'Status', value: user.status, inline: true },
                 { name: 'Live', value: isActuallyRunning ? '✅' : '❌', inline: true },
                 { name: 'Claimed', value: `${claimed}`, inline: true },
-                { name: 'Allowed Users', value: allowed.map(id => `<@${id}>`).join(', ') || 'None', inline: false },
-                { name: 'Guilds', value: user.guild_ids || 'Not set', inline: false }
+                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true },
+                { name: 'Guilds', value: user.guild_ids || 'Not set', inline: false },
+                { name: 'Categories', value: user.category_ids || 'All', inline: false }
             )
             .setColor(isActuallyRunning ? 0x00FF00 : 0xFF0000);
 
@@ -321,7 +294,7 @@ bot.on('interactionCreate', async interaction => {
             new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Guilds').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('add_user').setLabel('➕ Add User').setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Claim Cmd').setStyle(ButtonStyle.Secondary)
         );
 
         const row2 = new ActionRowBuilder().addComponents(
@@ -392,9 +365,9 @@ bot.on('interactionCreate', async interaction => {
         if (interaction.customId === 'set_token') input.setLabel('Discord Token');
         if (interaction.customId === 'set_guilds') input.setLabel('Guild IDs (comma)');
         if (interaction.customId === 'set_categories') input.setLabel('Category IDs (comma)');
-        if (interaction.customId === 'add_user') {
-            input.setLabel('Discord User ID to allow');
-            input.setPlaceholder('123456789012345678');
+        if (interaction.customId === 'set_cmd') {
+            input.setLabel('Claim Command');
+            input.setPlaceholder('.claim');
         }
 
         modal.addComponents(new ActionRowBuilder().addComponents(input));
@@ -403,24 +376,9 @@ bot.on('interactionCreate', async interaction => {
 
     if (interaction.isModalSubmit()) {
         const value = interaction.fields.getTextInputValue('value');
-        const field = interaction.customId.replace('modal_set_', '').replace('modal_add_', '');
+        const field = interaction.customId.replace('modal_set_', '');
         
-        if (field === 'user') {
-            // Add allowed user
-            const existing = db.prepare('SELECT allowed_users FROM users WHERE user_id = ?').get(interaction.user.id);
-            let allowed = existing ? JSON.parse(existing.allowed_users || '[]') : [];
-            if (!allowed.includes(value)) allowed.push(value);
-            db.prepare('UPDATE users SET allowed_users = ? WHERE user_id = ?').run(JSON.stringify(allowed), interaction.user.id);
-            
-            // Update active selfbot
-            const sb = activeSelfbots.get(interaction.user.id);
-            if (sb) sb.allowedUsers.add(value);
-            
-            await interaction.reply({ content: `✅ Added <@${value}> to allowed users`, ephemeral: true });
-            return;
-        }
-        
-        const map = { token: 'token', guilds: 'guild_ids', categories: 'category_ids', user: 'allowed_users' };
+        const map = { token: 'token', guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
         if (map[field]) {
             db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
         }
