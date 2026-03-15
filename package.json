@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js-selfbot-v13": "2.14.9"
+    "discord.js-selfbot-v13": "3.3.0"
   },
   "engines": {
     "node": "18.x"
