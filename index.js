@@ -1,4 +1,4 @@
-const { Client, Intents, Partials, Events } = require('discord.js-selfbot-v13');
+const { Client, Intents, Events } = require('discord.js-selfbot-v13');
 
 const TOKEN = process.env.TOKEN;
 const TARGET_GUILD_ID = process.env.GUILD_ID || '1420535190500933713';
@@ -10,7 +10,6 @@ const client = new Client({
         Intents.FLAGS.GUILDS,
         Intents.FLAGS.GUILD_MESSAGES
     ],
-    partials: [Partials.Channel],
     ws: {
         properties: getSuperProperties()
     },
@@ -53,11 +52,9 @@ function getSuperProperties() {
 }
 
 client.once(Events.ClientReady, async () => {
-    console.log(`[READY] Logged in as ${client.user.tag}`);
-    console.log(`[CONFIG] Guild: ${TARGET_GUILD_ID}`);
-    console.log(`[CATEGORY] ${TICKET_CATEGORY_ID ? TICKET_CATEGORY_ID : 'All channels'}`);
-    console.log(`[ANTIBAN] ${ANTI_BAN_DELAY.min}-${ANTI_BAN_DELAY.max}ms`);
-    console.log(`[DEVICE] iPhone 11 | Oslo 1255`);
+    console.log(`[READY] ${client.user.tag}`);
+    console.log(`[GUILD] ${TARGET_GUILD_ID}`);
+    console.log(`[CATEGORY] ${TICKET_CATEGORY_ID || 'All'}`);
     
     const guild = client.guilds.cache.get(TARGET_GUILD_ID);
     if (!guild) {
@@ -65,14 +62,12 @@ client.once(Events.ClientReady, async () => {
         return;
     }
     
-    console.log(`[GUILD] ${guild.name}`);
-    
     if (TICKET_CATEGORY_ID) {
-        const categoryChannels = guild.channels.cache.filter(
+        const channels = guild.channels.cache.filter(
             ch => ch.parentId === TICKET_CATEGORY_ID && ch.type === 'GUILD_TEXT'
         );
-        console.log(`[INIT] ${categoryChannels.size} existing tickets`);
-        categoryChannels.forEach(ch => monitorChannel(ch));
+        console.log(`[INIT] ${channels.size} tickets`);
+        channels.forEach(ch => monitorChannel(ch));
     }
     
     startMonitoring(guild);
@@ -93,8 +88,10 @@ async function sendClaim(channel) {
         console.log(`[CLAIM] #${channel.name}`);
         claimedChannels.add(channel.id);
         
-        const filter = m => m.author.id === client.user.id || m.content.includes('.unclaim');
-        const collector = channel.createMessageCollector({ filter, time: 300000 });
+        const collector = channel.createMessageCollector({ 
+            filter: m => m.author.id === client.user.id || m.content.includes('.unclaim'),
+            time: 300000 
+        });
         
         collector.on('collect', m => {
             if (m.content === '.unclaim' || m.content.includes('unclaimed')) {
@@ -132,8 +129,6 @@ function startMonitoring(guild) {
 }
 
 function monitorChannel(channel) {
-    if (channel.type !== 'GUILD_TEXT') return;
-    
     client.on(Events.MessageCreate, (message) => {
         if (message.channelId !== channel.id) return;
         if (!isRunning) return;
@@ -152,9 +147,8 @@ function monitorChannel(channel) {
         }
         
         if (!claimedChannels.has(channel.id) && !message.author.bot) {
-            channel.messages.fetch({ limit: 5 }).then(messages => {
-                const hasClaim = messages.some(m => m.content === '.claim');
-                if (!hasClaim && isRunning) {
+            channel.messages.fetch({ limit: 5 }).then(msgs => {
+                if (!msgs.some(m => m.content === '.claim') && isRunning) {
                     setTimeout(() => sendClaim(channel), randomDelay());
                 }
             }).catch(() => {});
@@ -167,18 +161,16 @@ client.on(Events.MessageCreate, message => {
     
     if (message.content === '.stop') {
         isRunning = false;
-        console.log('[STOPPED]');
         message.reply('⏹️ Stopped').catch(() => {});
     }
     
     if (message.content === '.start') {
         isRunning = true;
-        console.log('[STARTED]');
         message.reply('▶️ Started').catch(() => {});
     }
     
     if (message.content === '.status') {
-        message.reply(`📊 ${isRunning ? 'RUNNING' : 'STOPPED'} | Claimed: ${claimedChannels.size}`).catch(() => {});
+        message.reply(`📊 ${isRunning ? 'RUNNING' : 'STOPPED'} | ${claimedChannels.size}`).catch(() => {});
     }
 });
 
@@ -188,11 +180,8 @@ setInterval(() => {
     client.user.setStatus(statuses[Math.floor(Math.random() * statuses.length)]);
 }, 300000);
 
-client.on(Events.Error, error => console.log(`[WS] ${error.message}`));
-client.on(Events.Disconnect, () => {
-    console.log('[DISCONNECT] Reconnecting...');
-    setTimeout(() => client.login(TOKEN), 5000);
-});
+client.on(Events.Error, err => console.log(`[WS] ${err.message}`));
+client.on(Events.Disconnect, () => setTimeout(() => client.login(TOKEN), 5000));
 
 client.login(TOKEN).catch(err => {
     console.log(`[LOGIN] ${err.message}`);
