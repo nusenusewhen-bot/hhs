@@ -1,3 +1,6 @@
+process.on('unhandledRejection', () => {});
+process.on('uncaughtException', () => {});
+
 const { Client } = require('discord.js-selfbot-v13');
 
 const TOKEN = process.env.TOKEN;
@@ -6,13 +9,15 @@ const TICKET_CATEGORY_ID = process.env.CATEGORY;
 const ANTI_BAN_DELAY = { min: 200, max: 300 };
 
 const client = new Client({
-    checkUpdate: false
+    checkUpdate: false,
+    patchVoice: false,
+    disabledEvents: ['GUILD_MEMBER_UPDATE', 'USER_SETTINGS_UPDATE', 'USER_GUILD_SETTINGS_UPDATE']
 });
 
 let isRunning = true;
 let claimedChannels = new Set();
 
-client.once('ready', async () => {
+client.once('ready', () => {
     console.log(`[READY] ${client.user.tag}`);
     console.log(`[GUILD] ${TARGET_GUILD_ID}`);
     console.log(`[CATEGORY] ${TICKET_CATEGORY_ID || 'All'}`);
@@ -22,6 +27,8 @@ client.once('ready', async () => {
         console.log('[ERROR] Guild not found');
         return;
     }
+    
+    console.log(`[GUILD] ${guild.name}`);
     
     if (TICKET_CATEGORY_ID) {
         const channels = guild.channels.cache.filter(
@@ -61,7 +68,7 @@ async function sendClaim(channel) {
         });
         
     } catch (err) {
-        console.log(`[ERROR] ${err.message}`);
+        // Silently fail
     }
 }
 
@@ -133,7 +140,7 @@ client.on('messageCreate', message => {
     }
 });
 
-client.on('error', err => console.log(`[WS] ${err.message}`));
+client.on('error', () => {});
 client.on('disconnect', () => setTimeout(() => client.login(TOKEN), 5000));
 
 client.login(TOKEN).catch(err => {
