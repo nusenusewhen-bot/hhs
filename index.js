@@ -22,6 +22,7 @@ class UserSelfbot {
         this.client = null;
         this.isRunning = false;
         this.claimedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
+        this.monitoredChannels = new Set();
         
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
@@ -35,6 +36,10 @@ class UserSelfbot {
         db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run(JSON.stringify([...this.claimedChannels]), this.userId);
     }
 
+    saveStatus() {
+        db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run(this.isRunning ? 'running' : 'stopped', this.userId);
+    }
+
     shouldMonitor(channel) {
         if (!this.guildIds.includes(channel.guildId)) return false;
         if (this.categoryIds.length === 0) return true;
@@ -46,7 +51,7 @@ class UserSelfbot {
         
         this.client = new SelfbotClient({ checkUpdate: false });
         this.isRunning = true;
-        db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', this.userId);
+        this.saveStatus();
 
         this.client.once('ready', () => {
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
@@ -55,7 +60,10 @@ class UserSelfbot {
                 if (!this.guildIds.includes(guild.id)) return;
                 guild.channels.cache.forEach(ch => {
                     if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
-                    if (!this.claimedChannels.has(ch.id)) this.monitor(ch);
+                    if (!this.claimedChannels.has(ch.id)) {
+                        this.monitor(ch);
+                        this.monitoredChannels.add(ch.id);
+                    }
                 });
             });
 
@@ -65,10 +73,14 @@ class UserSelfbot {
                 
                 console.log(`[NEW] #${channel.name}`);
                 this.monitor(channel);
-                setTimeout(() => this.claim(channel), this.randomDelay());
+                this.monitoredChannels.add(channel.id);
+                if (this.isRunning) {
+                    setTimeout(() => this.claim(channel), this.randomDelay());
+                }
             });
 
             this.client.on('channelDelete', channel => {
+                this.monitoredChannels.delete(channel.id);
                 if (this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.delete(channel.id);
                     this.saveClaimed();
@@ -79,7 +91,7 @@ class UserSelfbot {
         this.client.on('error', () => {});
         this.client.login(this.config.token).catch(() => {
             this.isRunning = false;
-            db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
+            this.saveStatus();
         });
     }
 
@@ -89,7 +101,7 @@ class UserSelfbot {
             this.client = null;
         }
         this.isRunning = false;
-        db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
+        this.saveStatus();
         console.log(`[STOPPED] ${this.userId}`);
     }
 
@@ -106,31 +118,35 @@ class UserSelfbot {
         } catch (err) {}
     }
 
+    async sendStatusMessage(channel, status) {
+        try {
+            await new Promise(r => setTimeout(r, 3000));
+            await channel.send(status ? '✅ Started' : '✅ Stopped');
+        } catch (err) {}
+    }
+
     monitor(channel) {
-        this.client.on('messageCreate', async (msg) => {
+        const messageHandler = async (msg) => {
             if (msg.channelId !== channel.id) return;
+            if (msg.author.id !== this.client.user.id) return;
             
-            // Control commands - work even when stopped
-            if (msg.content === '.stop' && msg.author.id === this.client.user.id) {
+            // Control commands detection
+            if (msg.content === '.stop') {
                 if (!this.isRunning) return;
                 this.isRunning = false;
-                db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
-                setTimeout(() => {
-                    msg.channel.send('✅').catch(() => {});
-                }, 3000);
-                console.log(`[CMD] Stopped in #${channel.name}`);
+                this.saveStatus();
+                console.log(`[CMD] .stop in #${channel.name}`);
+                this.sendStatusMessage(channel, false);
                 return;
             }
 
-            if (msg.content === '.start' && msg.author.id === this.client.user.id) {
+            if (msg.content === '.start') {
                 if (this.isRunning) return;
                 this.isRunning = true;
-                db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', this.userId);
-                setTimeout(() => {
-                    msg.channel.send('✅').catch(() => {});
-                }, 3000);
-                console.log(`[CMD] Started in #${channel.name}`);
-                // Try to claim this channel immediately if not claimed
+                this.saveStatus();
+                console.log(`[CMD] .start in #${channel.name}`);
+                this.sendStatusMessage(channel, true);
+                // Try claim this channel if not claimed
                 if (!this.claimedChannels.has(channel.id)) {
                     setTimeout(() => this.claim(channel), this.randomDelay());
                 }
@@ -140,7 +156,7 @@ class UserSelfbot {
             if (!this.isRunning) return;
 
             // Claim detection
-            if (msg.content === this.config.claim_cmd) {
+            if (msg.content === this.config.claim_cmd && msg.author.id !== this.client.user.id) {
                 if (!this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.add(channel.id);
                     this.saveClaimed();
@@ -160,7 +176,23 @@ class UserSelfbot {
                     }
                 }).catch(() => {});
             }
-        });
+        };
+
+        this.client.on('messageCreate', messageHandler);
+    }
+
+    updateStatusFromDB() {
+        const user = db.prepare('SELECT status FROM users WHERE user_id = ?').get(this.userId);
+        if (!user) return;
+        
+        const shouldRun = user.status === 'running';
+        if (shouldRun && !this.isRunning) {
+            this.isRunning = true;
+            console.log(`[SYNC] Started from DB`);
+        } else if (!shouldRun && this.isRunning) {
+            this.isRunning = false;
+            console.log(`[SYNC] Stopped from DB`);
+        }
     }
 }
 
@@ -237,26 +269,46 @@ bot.on('interactionCreate', async interaction => {
     }
 
     if (interaction.isButton()) {
+        const userId = interaction.user.id;
+
         if (interaction.customId === 'start') {
-            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-            const sb = new UserSelfbot(interaction.user.id, user);
-            activeSelfbots.set(interaction.user.id, sb);
-            sb.start();
+            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+            let sb = activeSelfbots.get(userId);
+            
+            if (!sb) {
+                sb = new UserSelfbot(userId, user);
+                activeSelfbots.set(userId, sb);
+            }
+            
+            if (!sb.isRunning) {
+                db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', userId);
+                sb.isRunning = true;
+                sb.saveStatus();
+                if (!sb.client) sb.start();
+            }
+            
             await interaction.update({ content: '▶️ Started', embeds: [], components: [] });
             return;
         }
 
         if (interaction.customId === 'stop') {
-            const sb = activeSelfbots.get(interaction.user.id);
-            if (sb) sb.stop();
-            activeSelfbots.delete(interaction.user.id);
+            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+            let sb = activeSelfbots.get(userId);
+            
+            db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
+            
+            if (sb) {
+                sb.isRunning = false;
+                sb.saveStatus();
+            }
+            
             await interaction.update({ content: '⏹️ Stopped', embeds: [], components: [] });
             return;
         }
 
         if (interaction.customId === 'reset') {
-            db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run('[]', interaction.user.id);
-            const sb = activeSelfbots.get(interaction.user.id);
+            db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run('[]', userId);
+            const sb = activeSelfbots.get(userId);
             if (sb) sb.claimedChannels.clear();
             await interaction.reply({ content: '✅ Reset', ephemeral: true });
             return;
@@ -282,6 +334,23 @@ bot.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ Saved', ephemeral: true });
     }
 });
+
+// Sync status from DB to running selfbots every 5 seconds
+setInterval(() => {
+    activeSelfbots.forEach((sb, userId) => {
+        const user = db.prepare('SELECT status FROM users WHERE user_id = ?').get(userId);
+        if (!user) return;
+        
+        const shouldRun = user.status === 'running';
+        if (shouldRun && !sb.isRunning && sb.client) {
+            sb.isRunning = true;
+            console.log(`[AUTO-START] ${userId}`);
+        } else if (!shouldRun && sb.isRunning) {
+            sb.isRunning = false;
+            console.log(`[AUTO-STOP] ${userId}`);
+        }
+    });
+}, 5000);
 
 bot.once('ready', () => {
     console.log(`[BOT] ${bot.user.tag}`);
