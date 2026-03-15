@@ -1,7 +1,7 @@
 const { Client } = require('discord.js-selfbot-v13');
 
 const TOKEN = process.env.TOKEN;
-const TARGET_GUILD_ID = process.env.GUILD_ID || '1420535190500933713';
+const TARGET_GUILD_ID = process.env.GUILD_ID || '1482823113157644361';
 const TICKET_CATEGORY_ID = process.env.CATEGORY;
 
 console.log('[INIT] Starting...');
