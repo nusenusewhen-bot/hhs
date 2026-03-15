@@ -3,46 +3,37 @@ const { Client } = require('discord.js-selfbot-v13');
 const TOKEN = process.env.TOKEN;
 const TARGET_GUILD_ID = process.env.GUILD_ID || '1420535190500933713';
 const TICKET_CATEGORY_ID = process.env.CATEGORY;
-const ANTI_BAN_DELAY = { min: 200, max: 300 };
 
-console.log('[INIT] Starting selfbot...');
-console.log(`[CONFIG] Guild: ${TARGET_GUILD_ID}`);
-console.log(`[CONFIG] Category: ${TICKET_CATEGORY_ID || 'All'}`);
-console.log(`[TOKEN] ${TOKEN ? 'Token present (' + TOKEN.slice(0, 10) + '...)' : 'TOKEN MISSING!'}`);
+console.log('[INIT] Starting...');
 
 if (!TOKEN) {
-    console.log('[FATAL] No token provided in environment variables');
+    console.log('[FATAL] No token');
     process.exit(1);
 }
 
 const client = new Client({
-    checkUpdate: false,
-    patchVoice: false
+    checkUpdate: false
 });
 
 let isRunning = true;
 let claimedChannels = new Set();
 
 client.once('ready', () => {
-    console.log(`[READY] Logged in as ${client.user.tag} (${client.user.id})`);
+    console.log(`[READY] ${client.user.tag}`);
     
     const guild = client.guilds.cache.get(TARGET_GUILD_ID);
     if (!guild) {
-        console.log(`[ERROR] Guild ${TARGET_GUILD_ID} not found. Available guilds:`);
-        client.guilds.cache.forEach(g => console.log(`  - ${g.name} (${g.id})`));
+        console.log('[ERROR] Guild not found');
         return;
     }
     
-    console.log(`[GUILD] Found: ${guild.name}`);
+    console.log(`[GUILD] ${guild.name}`);
     
     if (TICKET_CATEGORY_ID) {
-        const category = guild.channels.cache.get(TICKET_CATEGORY_ID);
-        console.log(`[CATEGORY] ${category ? category.name : 'NOT FOUND'}`);
-        
         const channels = guild.channels.cache.filter(
             ch => ch.parentId === TICKET_CATEGORY_ID && ch.type === 'GUILD_TEXT'
         );
-        console.log(`[INIT] ${channels.size} existing tickets`);
+        console.log(`[INIT] ${channels.size} tickets`);
         channels.forEach(ch => monitorChannel(ch));
     }
     
@@ -50,7 +41,7 @@ client.once('ready', () => {
 });
 
 function randomDelay() {
-    return Math.floor(Math.random() * (ANTI_BAN_DELAY.max - ANTI_BAN_DELAY.min + 1)) + ANTI_BAN_DELAY.min;
+    return Math.floor(Math.random() * 100) + 200;
 }
 
 async function sendClaim(channel) {
@@ -68,7 +59,7 @@ async function sendClaim(channel) {
         });
         
         collector.on('collect', m => {
-            if (m.content === '.unclaim' || m.content.includes('unclaimed')) {
+            if (m.content.includes('unclaim')) {
                 claimedChannels.delete(channel.id);
                 console.log(`[UNCLAIM] #${channel.name}`);
                 collector.stop();
@@ -76,7 +67,7 @@ async function sendClaim(channel) {
         });
         
     } catch (err) {
-        console.log(`[ERROR] Claim failed: ${err.message}`);
+        console.log(`[ERROR] ${err.message}`);
     }
 }
 
@@ -89,9 +80,7 @@ function startMonitoring(guild) {
         console.log(`[NEW] #${channel.name}`);
         monitorChannel(channel);
         
-        if (isRunning) {
-            setTimeout(() => sendClaim(channel), randomDelay());
-        }
+        if (isRunning) setTimeout(() => sendClaim(channel), randomDelay());
     });
     
     client.on('channelDelete', channel => {
@@ -148,25 +137,9 @@ client.on('messageCreate', message => {
     }
 });
 
-client.on('error', (err) => {
-    console.log(`[WS ERROR] ${err.message}`);
-});
+client.on('error', err => console.log(`[WS] ${err.message}`));
 
-client.on('disconnect', () => {
-    console.log('[DISCONNECT] Reconnecting...');
-    setTimeout(() => client.login(TOKEN), 5000);
-});
-
-client.on('debug', (info) => {
-    if (info.includes('hit')) return;
-    console.log(`[DEBUG] ${info}`);
-});
-
-console.log('[LOGIN] Attempting login...');
-client.login(TOKEN).then(() => {
-    console.log('[LOGIN] Success');
-}).catch(err => {
-    console.log(`[LOGIN FAIL] ${err.message}`);
-    console.log(`[LOGIN FAIL] Code: ${err.code || 'N/A'}`);
+client.login(TOKEN).catch(err => {
+    console.log(`[LOGIN] ${err.message}`);
     process.exit(1);
 });
