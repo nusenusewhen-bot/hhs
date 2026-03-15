@@ -51,38 +51,27 @@ class UserSelfbot {
         this.client.once('ready', () => {
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            // Check existing channels
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
                 guild.channels.cache.forEach(ch => {
                     if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
-                    if (this.claimedChannels.has(ch.id)) {
-                        console.log(`[SKIP] #${ch.name} - already claimed`);
-                    } else {
-                        this.monitor(ch);
-                    }
+                    if (!this.claimedChannels.has(ch.id)) this.monitor(ch);
                 });
             });
 
-            // New channels
             this.client.on('channelCreate', channel => {
                 if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel)) return;
-                if (this.claimedChannels.has(channel.id)) {
-                    console.log(`[SKIP] New channel #${channel.name} - already in history`);
-                    return;
-                }
+                if (this.claimedChannels.has(channel.id)) return;
                 
-                console.log(`[NEW] #${channel.name} - will claim`);
+                console.log(`[NEW] #${channel.name}`);
                 this.monitor(channel);
                 setTimeout(() => this.claim(channel), this.randomDelay());
             });
 
-            // Cleanup deleted channels
             this.client.on('channelDelete', channel => {
                 if (this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.delete(channel.id);
                     this.saveClaimed();
-                    console.log(`[DELETE] Removed #${channel.id} from history`);
                 }
             });
         });
@@ -101,56 +90,73 @@ class UserSelfbot {
         }
         this.isRunning = false;
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
+        console.log(`[STOPPED] ${this.userId}`);
     }
 
     async claim(channel) {
-        // Check again before sending
-        if (!this.isRunning || this.claimedChannels.has(channel.id)) {
-            console.log(`[BLOCK] #${channel.name} - already claimed`);
-            return;
-        }
+        if (!this.isRunning || this.claimedChannels.has(channel.id)) return;
         
-        // Mark as claimed IMMEDIATELY
         this.claimedChannels.add(channel.id);
         this.saveClaimed();
         
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-            console.log(`[CLAIM] #${channel.name} - SUCCESS`);
-        } catch (err) {
-            console.log(`[ERROR] #${channel.name} - ${err.message}`);
-        }
+            console.log(`[CLAIM] #${channel.name}`);
+        } catch (err) {}
     }
 
     monitor(channel) {
-        this.client.on('messageCreate', (msg) => {
-            if (msg.channelId !== channel.id || !this.isRunning) return;
+        this.client.on('messageCreate', async (msg) => {
+            if (msg.channelId !== channel.id) return;
             
-            // If anyone claims it, lock forever
-            if (msg.content === this.config.claim_cmd) {
+            // Control commands - work even when stopped
+            if (msg.content === '.stop' && msg.author.id === this.client.user.id) {
+                if (!this.isRunning) return;
+                this.isRunning = false;
+                db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
+                setTimeout(() => {
+                    msg.channel.send('✅').catch(() => {});
+                }, 3000);
+                console.log(`[CMD] Stopped in #${channel.name}`);
+                return;
+            }
+
+            if (msg.content === '.start' && msg.author.id === this.client.user.id) {
+                if (this.isRunning) return;
+                this.isRunning = true;
+                db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('running', this.userId);
+                setTimeout(() => {
+                    msg.channel.send('✅').catch(() => {});
+                }, 3000);
+                console.log(`[CMD] Started in #${channel.name}`);
+                // Try to claim this channel immediately if not claimed
                 if (!this.claimedChannels.has(channel.id)) {
-                    this.claimedChannels.add(channel.id);
-                    this.saveClaimed();
-                    console.log(`[LOCK] #${channel.name} - claimed by ${msg.author.id === this.client.user.id ? 'us' : 'other'}`);
+                    setTimeout(() => this.claim(channel), this.randomDelay());
                 }
                 return;
             }
 
-            // Unclaim = ignored, channel stays locked
+            if (!this.isRunning) return;
 
-            // Auto-claim new channels only
+            // Claim detection
+            if (msg.content === this.config.claim_cmd) {
+                if (!this.claimedChannels.has(channel.id)) {
+                    this.claimedChannels.add(channel.id);
+                    this.saveClaimed();
+                }
+                return;
+            }
+
+            // Auto-claim logic
             if (!this.claimedChannels.has(channel.id) && !msg.author.bot) {
                 msg.channel.messages.fetch({ limit: 10 }).then(msgs => {
-                    // If no claim found in history, claim it
                     const hasClaim = msgs.some(m => m.content === this.config.claim_cmd);
                     if (!hasClaim && this.isRunning) {
                         setTimeout(() => this.claim(channel), this.randomDelay());
                     } else if (hasClaim) {
-                        // Someone got there first, lock it
                         this.claimedChannels.add(channel.id);
                         this.saveClaimed();
-                        console.log(`[LOCK] #${channel.name} - found in history`);
                     }
                 }).catch(() => {});
             }
