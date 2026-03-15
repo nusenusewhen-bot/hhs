@@ -7,10 +7,9 @@
   },
   "dependencies": {
     "discord.js-selfbot-v13": "2.14.9",
-    "werift-rtp": "0.0.4",
     "ws": "^8.14.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.x"
   }
 }
