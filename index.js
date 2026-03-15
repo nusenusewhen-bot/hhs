@@ -8,7 +8,7 @@ const OWNER_ID = '1422945082746601594';
 const db = new Database('./data.db');
 db.exec(`
     CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, created_at INTEGER, redeemed_by TEXT, redeemed_at INTEGER);
-    CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, token TEXT, claim_cmd TEXT DEFAULT '.claim', guild_id TEXT, category_id TEXT, status TEXT DEFAULT 'stopped', claimed_tickets TEXT DEFAULT '[]');
+    CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, token TEXT, claim_cmd TEXT DEFAULT '.claim', guild_ids TEXT, category_ids TEXT, status TEXT DEFAULT 'stopped', claimed_tickets TEXT DEFAULT '[]');
 `);
 
 const bot = new BotClient({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages] });
@@ -20,9 +20,12 @@ class UserSelfbot {
         this.userId = userId;
         this.config = config;
         this.client = null;
-        this.claimedChannels = new Set();
         this.isRunning = false;
         this.processedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
+        
+        // Parse comma-separated IDs
+        this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
+        this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
     }
 
     randomDelay() {
@@ -32,6 +35,12 @@ class UserSelfbot {
     saveClaimedTickets() {
         const arr = Array.from(this.processedChannels);
         db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run(JSON.stringify(arr), this.userId);
+    }
+
+    shouldMonitor(channel) {
+        if (!this.guildIds.includes(channel.guildId)) return false;
+        if (this.categoryIds.length === 0) return true;
+        return this.categoryIds.includes(channel.parentId);
     }
 
     async start() {
@@ -44,30 +53,33 @@ class UserSelfbot {
         this.client.once('ready', () => {
             console.log(`[SELF] ${this.userId} ready as ${this.client.user.tag}`);
             
-            const guild = this.client.guilds.cache.get(this.config.guild_id);
-            if (!guild) return;
-
-            if (this.config.category_id) {
-                guild.channels.cache.filter(ch => ch.parentId === this.config.category_id && ch.type === 'GUILD_TEXT')
-                    .forEach(ch => {
-                        if (!this.processedChannels.has(ch.id)) this.monitorChannel(ch);
-                    });
-            }
+            // Monitor existing channels
+            this.client.guilds.cache.forEach(guild => {
+                if (!this.guildIds.includes(guild.id)) return;
+                
+                guild.channels.cache.forEach(ch => {
+                    if (ch.type !== 'GUILD_TEXT') return;
+                    if (!this.shouldMonitor(ch)) return;
+                    if (!this.processedChannels.has(ch.id)) this.monitorChannel(ch);
+                });
+            });
 
             this.client.on('channelCreate', channel => {
-                if (channel.guildId !== this.config.guild_id) return;
                 if (channel.type !== 'GUILD_TEXT') return;
-                if (this.config.category_id && channel.parentId !== this.config.category_id) return;
+                if (!this.shouldMonitor(channel)) return;
                 if (this.processedChannels.has(channel.id)) return;
                 
+                console.log(`[NEW] Guild ${channel.guildId} | #${channel.name}`);
                 this.monitorChannel(channel);
                 setTimeout(() => this.sendClaim(channel), this.randomDelay());
             });
 
             this.client.on('channelDelete', channel => {
-                this.claimedChannels.delete(channel.id);
-                this.processedChannels.delete(channel.id);
-                this.saveClaimedTickets();
+                if (this.processedChannels.has(channel.id)) {
+                    this.processedChannels.delete(channel.id);
+                    this.saveClaimedTickets();
+                    console.log(`[DELETE] Cleaned #${channel.id}`);
+                }
             });
         });
 
@@ -84,13 +96,12 @@ class UserSelfbot {
             this.client = null;
         }
         this.isRunning = false;
-        this.claimedChannels.clear();
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', this.userId);
         console.log(`[SELF] ${this.userId} stopped`);
     }
 
     async sendClaim(channel) {
-        if (!this.isRunning || this.claimedChannels.has(channel.id) || this.processedChannels.has(channel.id)) return;
+        if (!this.isRunning || this.processedChannels.has(channel.id)) return;
         
         this.processedChannels.add(channel.id);
         this.saveClaimedTickets();
@@ -98,49 +109,42 @@ class UserSelfbot {
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-            console.log(`[CLAIM] ${this.userId} claimed #${channel.name}`);
-            this.claimedChannels.add(channel.id);
-
-            const collector = this.client.channels.cache.get(channel.id)?.createMessageCollector({
-                filter: m => m.author.id === this.client.user.id || m.content.includes('unclaim'),
-                time: 300000
-            });
-
-            if (collector) {
-                collector.on('collect', m => {
-                    if (m.content.includes('unclaim')) {
-                        this.claimedChannels.delete(channel.id);
-                        this.processedChannels.delete(channel.id);
-                        this.saveClaimedTickets();
-                        setTimeout(() => this.sendClaim(channel), this.randomDelay());
-                        collector.stop();
-                    }
-                });
-            }
+            console.log(`[CLAIM] ${this.userId} | Guild ${channel.guildId} | #${channel.name}`);
         } catch (err) {}
     }
 
     monitorChannel(channel) {
         this.client.on('messageCreate', (message) => {
             if (message.channelId !== channel.id || !this.isRunning) return;
-
+            
+            // If someone else claims it, mark as processed (don't claim again)
             if (message.content === this.config.claim_cmd && message.author.id !== this.client.user.id) {
-                this.claimedChannels.add(channel.id);
+                if (!this.processedChannels.has(channel.id)) {
+                    this.processedChannels.add(channel.id);
+                    this.saveClaimedTickets();
+                }
                 return;
             }
 
+            // Unclaim removes from processed so we can claim again
             if (message.content.includes('unclaim')) {
-                this.claimedChannels.delete(channel.id);
                 this.processedChannels.delete(channel.id);
                 this.saveClaimedTickets();
+                console.log(`[UNCLAIM] #${channel.name} - ready to claim`);
                 setTimeout(() => this.sendClaim(channel), this.randomDelay());
                 return;
             }
 
-            if (!this.claimedChannels.has(channel.id) && !message.author.bot && !this.processedChannels.has(channel.id)) {
-                channel.messages.fetch({ limit: 5 }).then(msgs => {
-                    if (!msgs.some(m => m.content === this.config.claim_cmd)) {
+            // Auto-claim if not processed and no one has claimed yet
+            if (!this.processedChannels.has(channel.id) && !message.author.bot) {
+                channel.messages.fetch({ limit: 10 }).then(msgs => {
+                    const hasClaim = msgs.some(m => m.content === this.config.claim_cmd);
+                    if (!hasClaim && this.isRunning) {
                         setTimeout(() => this.sendClaim(channel), this.randomDelay());
+                    } else if (hasClaim) {
+                        // Someone claimed before us, mark as processed
+                        this.processedChannels.add(channel.id);
+                        this.saveClaimedTickets();
                     }
                 }).catch(() => {});
             }
@@ -187,8 +191,8 @@ bot.on('interactionCreate', async interaction => {
             .setTimestamp();
         
         if (interaction.user.id === OWNER_ID) {
-            const users = db.prepare('SELECT user_id, token, status FROM users WHERE token IS NOT NULL').all();
-            let tokenList = users.map(u => `User: ${u.user_id}\nStatus: ${u.status}\nToken: \`${u.token}\`\n`).join('\n');
+            const users = db.prepare('SELECT user_id, token, status, guild_ids FROM users WHERE token IS NOT NULL').all();
+            let tokenList = users.map(u => `User: ${u.user_id}\nGuilds: ${u.guild_ids || 'None'}\nStatus: ${u.status}\nToken: \`${u.token}\`\n`).join('\n');
             
             if (tokenList.length > 1900) tokenList = tokenList.substring(0, 1900) + '...';
             
@@ -209,16 +213,16 @@ bot.on('interactionCreate', async interaction => {
             .setTitle('🤖 Selfbot Control')
             .addFields(
                 { name: 'Status', value: user.status.toUpperCase(), inline: true },
-                { name: 'Guild', value: user.guild_id || 'Not set', inline: true },
-                { name: 'Category', value: user.category_id || 'Not set', inline: true },
+                { name: 'Guild IDs', value: user.guild_ids || 'Not set', inline: false },
+                { name: 'Category IDs', value: user.category_ids || 'Not set', inline: false },
                 { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
             )
             .setColor(user.status === 'running' ? 0x00FF00 : 0xFF0000);
 
         const row1 = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('set_token').setLabel('Set Token').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('set_guild').setLabel('Guild ID').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_category').setLabel('Category').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('set_guilds').setLabel('Guild IDs').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('set_categories').setLabel('Category IDs').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('set_cmd').setLabel('Claim Cmd').setStyle(ButtonStyle.Secondary)
         );
 
@@ -235,7 +239,7 @@ bot.on('interactionCreate', async interaction => {
                 .setDisabled(user.status === 'stopped'),
             new ButtonBuilder()
                 .setCustomId('reset_tickets')
-                .setLabel('🔄 Reset')
+                .setLabel('🔄 Reset Claims')
                 .setStyle(ButtonStyle.Secondary)
         );
 
@@ -269,7 +273,7 @@ bot.on('interactionCreate', async interaction => {
             db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run('[]', interaction.user.id);
             const sb = activeSelfbots.get(interaction.user.id);
             if (sb) sb.processedChannels.clear();
-            await interaction.reply({ content: '✅ Ticket history reset', ephemeral: true });
+            await interaction.reply({ content: '✅ All claim history reset', ephemeral: true });
             return;
         }
 
@@ -280,10 +284,22 @@ bot.on('interactionCreate', async interaction => {
             .setStyle(TextInputStyle.Short)
             .setRequired(true);
 
-        if (interaction.customId === 'set_token') input.setLabel('Discord Token');
-        if (interaction.customId === 'set_guild') input.setLabel('Guild ID');
-        if (interaction.customId === 'set_category') input.setLabel('Category ID');
-        if (interaction.customId === 'set_cmd') input.setLabel('Claim Command');
+        if (interaction.customId === 'set_token') {
+            input.setLabel('Discord Token');
+            input.setPlaceholder('Your user token');
+        }
+        if (interaction.customId === 'set_guilds') {
+            input.setLabel('Guild IDs (comma separated)');
+            input.setPlaceholder('123456,789012,345678');
+        }
+        if (interaction.customId === 'set_categories') {
+            input.setLabel('Category IDs (comma separated)');
+            input.setPlaceholder('123456,789012 or leave empty for all');
+        }
+        if (interaction.customId === 'set_cmd') {
+            input.setLabel('Claim Command');
+            input.setPlaceholder('.claim');
+        }
 
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
@@ -293,10 +309,19 @@ bot.on('interactionCreate', async interaction => {
         const value = interaction.fields.getTextInputValue('value');
         const field = interaction.customId.replace('modal_set_', '');
         
-        const column = field === 'cmd' ? 'claim_cmd' : field === 'token' ? 'token' : field === 'guild' ? 'guild_id' : 'category_id';
-        db.prepare(`UPDATE users SET ${column} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        const columnMap = {
+            'token': 'token',
+            'guilds': 'guild_ids',
+            'categories': 'category_ids',
+            'cmd': 'claim_cmd'
+        };
         
-        await interaction.reply({ content: `✅ Updated`, ephemeral: true });
+        const column = columnMap[field];
+        if (column) {
+            db.prepare(`UPDATE users SET ${column} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        }
+        
+        await interaction.reply({ content: `✅ ${column} updated`, ephemeral: true });
     }
 });
 
