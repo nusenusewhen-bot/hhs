@@ -23,6 +23,7 @@ class UserSelfbot {
         this.isRunning = config.status === 'running';
         this.isReady = false;
         this.claimedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
+        this.monitoredChannels = new Set();
         
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
@@ -47,7 +48,6 @@ class UserSelfbot {
     }
 
     canUseCommands(userId) {
-        // Configurer (this.userId) OR selfbot token owner
         return userId === this.userId || userId === this.client?.user?.id;
     }
 
@@ -75,44 +75,122 @@ class UserSelfbot {
             }
         });
 
+        // Global message handler for all channels
+        this.client.on('messageCreate', async (msg) => {
+            if (msg.author.bot && msg.author.id !== this.client.user.id) return;
+            
+            const channel = msg.channel;
+            if (channel.type !== 'GUILD_TEXT') return;
+            if (!this.shouldMonitor(channel)) return;
+            
+            // Track this channel
+            if (!this.monitoredChannels.has(channel.id)) {
+                this.monitoredChannels.add(channel.id);
+            }
+            
+            // Detect claims from anyone
+            if (msg.content === this.config.claim_cmd && !this.claimedChannels.has(channel.id)) {
+                this.claimedChannels.add(channel.id);
+                this.saveClaimed();
+                console.log(`[DETECTED] Claim in #${channel.name} by ${msg.author.tag}`);
+                return;
+            }
+
+            // Commands only for configurer or selfbot owner
+            if (!this.canUseCommands(msg.author.id)) return;
+            
+            if (msg.content === '.stop') {
+                if (!this.isRunning) {
+                    setTimeout(() => msg.channel.send('⏹️ Already stopped').catch(() => {}), 3000);
+                    return;
+                }
+                this.isRunning = false;
+                this.saveStatus();
+                console.log(`[CMD] .stop by ${msg.author.tag} in #${channel.name}`);
+                setTimeout(() => msg.channel.send('⏹️ Stopped').catch(() => {}), 3000);
+                return;
+            }
+
+            if (msg.content === '.start') {
+                if (this.isRunning) {
+                    setTimeout(() => msg.channel.send('▶️ Already running').catch(() => {}), 3000);
+                    return;
+                }
+                this.isRunning = true;
+                this.saveStatus();
+                console.log(`[CMD] .start by ${msg.author.tag} in #${channel.name}`);
+                setTimeout(() => msg.channel.send('▶️ Started').catch(() => {}), 3000);
+                
+                if (!this.claimedChannels.has(channel.id)) {
+                    setTimeout(() => this.claim(channel), this.randomDelay());
+                }
+                return;
+            }
+
+            // Auto-claim only if running and not claimed
+            if (!this.isRunning || this.claimedChannels.has(channel.id) || msg.author.bot) return;
+            
+            try {
+                const msgs = await msg.channel.messages.fetch({ limit: 10 });
+                const hasClaim = msgs.some(m => m.content === this.config.claim_cmd);
+                
+                if (!hasClaim) {
+                    console.log(`[AUTO] Will claim #${channel.name}`);
+                    setTimeout(() => this.claim(channel), this.randomDelay());
+                } else {
+                    this.claimedChannels.add(channel.id);
+                    this.saveClaimed();
+                }
+            } catch (err) {}
+        });
+
         this.client.once('ready', () => {
             this.isReady = true;
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
+            // Process existing channels
+            let setupCount = 0;
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
                 
                 guild.channels.cache.forEach(ch => {
                     if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
                     
-                    console.log(`[SETUP] #${ch.name}`);
-                    this.setupChannel(ch);
+                    this.monitoredChannels.add(ch.id);
+                    setupCount++;
                     
                     if (this.isRunning && !this.claimedChannels.has(ch.id)) {
+                        console.log(`[INIT] Will claim #${ch.name}`);
                         setTimeout(() => this.claim(ch), this.randomDelay());
                     }
                 });
             });
+            
+            console.log(`[INIT] ${this.userId} Monitoring ${setupCount} channels`);
+        });
 
-            this.client.on('channelCreate', channel => {
-                if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel)) return;
-                if (this.claimedChannels.has(channel.id)) return;
-                
-                console.log(`[NEW] #${channel.name}`);
-                this.setupChannel(channel);
-                
-                if (this.isRunning) {
-                    const delay = this.randomDelay();
-                    setTimeout(() => this.claim(channel), delay);
-                }
-            });
+        this.client.on('channelCreate', (channel) => {
+            if (channel.type !== 'GUILD_TEXT') return;
+            if (!this.shouldMonitor(channel)) return;
+            if (this.claimedChannels.has(channel.id)) return;
+            
+            console.log(`[CREATE] #${channel.name} in ${channel.guildId}`);
+            this.monitoredChannels.add(channel.id);
+            
+            if (this.isRunning) {
+                const delay = this.randomDelay();
+                console.log(`[CLAIM] Will claim #${channel.name} in ${delay}ms`);
+                setTimeout(() => this.claim(channel), delay);
+            }
+        });
 
-            this.client.on('channelDelete', channel => {
-                if (this.claimedChannels.has(channel.id)) {
-                    this.claimedChannels.delete(channel.id);
-                    this.saveClaimed();
-                }
-            });
+        this.client.on('channelDelete', (channel) => {
+            this.monitoredChannels.delete(channel.id);
+            if (this.claimedChannels.has(channel.id)) {
+                this.claimedChannels.delete(channel.id);
+                this.saveClaimed();
+                console.log(`[DELETE] Removed ${channel.id}`);
+            }
         });
 
         this.client.on('error', (err) => console.log(`[WS] ${err.message}`));
@@ -130,68 +208,11 @@ class UserSelfbot {
         }
     }
 
-    setupChannel(channel) {
-        this.client.on('messageCreate', async (msg) => {
-            if (msg.channelId !== channel.id) return;
-            
-            // Detect claims from anyone
-            if (msg.content === this.config.claim_cmd && !this.claimedChannels.has(channel.id)) {
-                this.claimedChannels.add(channel.id);
-                this.saveClaimed();
-                return;
-            }
-
-            // Commands only for configurer or selfbot owner
-            if (!this.canUseCommands(msg.author.id)) return;
-            
-            if (msg.content === '.stop') {
-                if (!this.isRunning) {
-                    setTimeout(() => msg.channel.send('⏹️ Already stopped').catch(() => {}), 3000);
-                    return;
-                }
-                this.isRunning = false;
-                this.saveStatus();
-                console.log(`[CMD] .stop by ${msg.author.tag}`);
-                setTimeout(() => msg.channel.send('⏹️ Stopped').catch(() => {}), 3000);
-                return;
-            }
-
-            if (msg.content === '.start') {
-                if (this.isRunning) {
-                    setTimeout(() => msg.channel.send('▶️ Already running').catch(() => {}), 3000);
-                    return;
-                }
-                this.isRunning = true;
-                this.saveStatus();
-                console.log(`[CMD] .start by ${msg.author.tag}`);
-                setTimeout(() => msg.channel.send('▶️ Started').catch(() => {}), 3000);
-                
-                if (!this.claimedChannels.has(channel.id)) {
-                    setTimeout(() => this.claim(channel), this.randomDelay());
-                }
-                return;
-            }
-
-            if (!this.isRunning) return;
-
-            // Auto-claim
-            if (!this.claimedChannels.has(channel.id) && !msg.author.bot) {
-                try {
-                    const msgs = await msg.channel.messages.fetch({ limit: 5 });
-                    const hasClaim = msgs.some(m => m.content === this.config.claim_cmd);
-                    if (!hasClaim) {
-                        setTimeout(() => this.claim(channel), this.randomDelay());
-                    } else {
-                        this.claimedChannels.add(channel.id);
-                        this.saveClaimed();
-                    }
-                } catch (err) {}
-            }
-        });
-    }
-
     async claim(channel) {
-        if (!this.isRunning || this.claimedChannels.has(channel.id)) return;
+        if (!this.isRunning || this.claimedChannels.has(channel.id)) {
+            console.log(`[SKIP] #${channel.name} - not running or claimed`);
+            return;
+        }
         
         this.claimedChannels.add(channel.id);
         this.saveClaimed();
@@ -199,7 +220,7 @@ class UserSelfbot {
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-            console.log(`[CLAIMED] #${channel.name}`);
+            console.log(`[CLAIMED] ${this.userId} in #${channel.name}`);
         } catch (err) {
             console.log(`[FAIL] #${channel.name}: ${err.message}`);
         }
@@ -211,6 +232,7 @@ class UserSelfbot {
             this.client = null;
         }
         this.isReady = false;
+        this.monitoredChannels.clear();
     }
 
     updateFromDB() {
