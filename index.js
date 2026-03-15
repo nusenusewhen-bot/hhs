@@ -1,23 +1,22 @@
-const { Client, GatewayIntentBits, Partials, Events } = require('discord.js-selfbot-v13');
+const { Client, Intents, Partials, Events } = require('discord.js-selfbot-v13');
 
 const TOKEN = process.env.TOKEN;
-const TARGET_GUILD_ID = process.env.GUILD_ID || '1482823113157644361';
-const TICKET_CATEGORY_ID = process.env.CATEGORY; // Category ID from variables
-const CLAIM_COOLDOWN = 250;
+const TARGET_GUILD_ID = process.env.GUILD_ID || '1420535190500933713';
+const TICKET_CATEGORY_ID = process.env.CATEGORY;
 const ANTI_BAN_DELAY = { min: 200, max: 300 };
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        Intents.FLAGS.GUILDS,
+        Intents.FLAGS.GUILD_MESSAGES
     ],
     partials: [Partials.Channel],
     ws: {
         properties: getSuperProperties()
     },
     restRequestTimeout: 60000,
-    retryLimit: 3
+    retryLimit: 3,
+    checkUpdate: false
 });
 
 let isRunning = true;
@@ -56,9 +55,9 @@ function getSuperProperties() {
 client.once(Events.ClientReady, async () => {
     console.log(`[READY] Logged in as ${client.user.tag}`);
     console.log(`[CONFIG] Guild: ${TARGET_GUILD_ID}`);
-    console.log(`[CATEGORY] ${TICKET_CATEGORY_ID ? 'Monitoring: ' + TICKET_CATEGORY_ID : 'No category set - monitoring all channels'}`);
-    console.log(`[ANTIBAN] Delay: ${ANTI_BAN_DELAY.min}-${ANTI_BAN_DELAY.max}ms`);
-    console.log(`[DEVICE] iPhone 11 | Oslo, Norway | Holmlia 1255`);
+    console.log(`[CATEGORY] ${TICKET_CATEGORY_ID ? TICKET_CATEGORY_ID : 'All channels'}`);
+    console.log(`[ANTIBAN] ${ANTI_BAN_DELAY.min}-${ANTI_BAN_DELAY.max}ms`);
+    console.log(`[DEVICE] iPhone 11 | Oslo 1255`);
     
     const guild = client.guilds.cache.get(TARGET_GUILD_ID);
     if (!guild) {
@@ -66,14 +65,13 @@ client.once(Events.ClientReady, async () => {
         return;
     }
     
-    console.log(`[GUILD] Connected to ${guild.name}`);
+    console.log(`[GUILD] ${guild.name}`);
     
-    // Monitor existing channels in category
     if (TICKET_CATEGORY_ID) {
         const categoryChannels = guild.channels.cache.filter(
-            ch => ch.parentId === TICKET_CATEGORY_ID && ch.isTextBased()
+            ch => ch.parentId === TICKET_CATEGORY_ID && ch.type === 'GUILD_TEXT'
         );
-        console.log(`[INIT] Found ${categoryChannels.size} existing ticket channels`);
+        console.log(`[INIT] ${categoryChannels.size} existing tickets`);
         categoryChannels.forEach(ch => monitorChannel(ch));
     }
     
@@ -91,9 +89,8 @@ async function sendClaim(channel) {
         await channel.sendTyping();
         await new Promise(r => setTimeout(r, randomDelay()));
         
-        const msg = await channel.send('.claim');
-        console.log(`[CLAIM] Sent in #${channel.name} (${channel.id})`);
-        
+        await channel.send('.claim');
+        console.log(`[CLAIM] #${channel.name}`);
         claimedChannels.add(channel.id);
         
         const filter = m => m.author.id === client.user.id || m.content.includes('.unclaim');
@@ -102,27 +99,23 @@ async function sendClaim(channel) {
         collector.on('collect', m => {
             if (m.content === '.unclaim' || m.content.includes('unclaimed')) {
                 claimedChannels.delete(channel.id);
-                console.log(`[UNCLAIM] Reset for #${channel.name}`);
+                console.log(`[UNCLAIM] #${channel.name}`);
                 collector.stop();
             }
         });
         
     } catch (err) {
-        console.log(`[ERROR] Failed to claim in #${channel.name}: ${err.message}`);
+        console.log(`[ERROR] ${err.message}`);
     }
 }
 
 function startMonitoring(guild) {
     client.on(Events.ChannelCreate, channel => {
         if (channel.guildId !== TARGET_GUILD_ID) return;
-        if (!channel.isTextBased()) return;
+        if (channel.type !== 'GUILD_TEXT') return;
+        if (TICKET_CATEGORY_ID && channel.parentId !== TICKET_CATEGORY_ID) return;
         
-        // Only claim if in target category or no category set
-        if (TICKET_CATEGORY_ID && channel.parentId !== TICKET_CATEGORY_ID) {
-            return;
-        }
-        
-        console.log(`[NEW TICKET] #${channel.name} in category ${channel.parentId}`);
+        console.log(`[NEW] #${channel.name}`);
         monitorChannel(channel);
         
         if (isRunning) {
@@ -133,21 +126,13 @@ function startMonitoring(guild) {
     client.on(Events.ChannelDelete, channel => {
         if (claimedChannels.has(channel.id)) {
             claimedChannels.delete(channel.id);
-            console.log(`[DELETE] Cleaned up #${channel.name}`);
-        }
-    });
-    
-    client.on(Events.ChannelUpdate, (oldChannel, newChannel) => {
-        // If channel moved out of category, stop monitoring
-        if (TICKET_CATEGORY_ID && oldChannel.parentId === TICKET_CATEGORY_ID && newChannel.parentId !== TICKET_CATEGORY_ID) {
-            claimedChannels.delete(newChannel.id);
-            console.log(`[MOVED] #${newChannel.name} left category`);
+            console.log(`[DELETE] #${channel.name}`);
         }
     });
 }
 
 function monitorChannel(channel) {
-    if (!channel.isTextBased() || channel.isDMBased()) return;
+    if (channel.type !== 'GUILD_TEXT') return;
     
     client.on(Events.MessageCreate, (message) => {
         if (message.channelId !== channel.id) return;
@@ -155,13 +140,13 @@ function monitorChannel(channel) {
         
         if (message.content === '.claim' && message.author.id !== client.user.id) {
             claimedChannels.add(channel.id);
-            console.log(`[BLOCKED] Someone claimed #${channel.name}`);
+            console.log(`[BLOCKED] #${channel.name}`);
             return;
         }
         
         if (message.content === '.unclaim') {
             claimedChannels.delete(channel.id);
-            console.log(`[OPEN] #${channel.name} available again`);
+            console.log(`[OPEN] #${channel.name}`);
             setTimeout(() => sendClaim(channel), randomDelay());
             return;
         }
@@ -182,35 +167,34 @@ client.on(Events.MessageCreate, message => {
     
     if (message.content === '.stop') {
         isRunning = false;
-        console.log('[CONTROL] Stopped');
+        console.log('[STOPPED]');
         message.reply('⏹️ Stopped').catch(() => {});
     }
     
     if (message.content === '.start') {
         isRunning = true;
-        console.log('[CONTROL] Started');
+        console.log('[STARTED]');
         message.reply('▶️ Started').catch(() => {});
     }
     
     if (message.content === '.status') {
-        const catStatus = TICKET_CATEGORY_ID ? `Category: ${TICKET_CATEGORY_ID}` : 'All channels';
-        message.reply(`📊 ${isRunning ? 'RUNNING' : 'STOPPED'}\n${catStatus}\nClaimed: ${claimedChannels.size}`).catch(() => {});
+        message.reply(`📊 ${isRunning ? 'RUNNING' : 'STOPPED'} | Claimed: ${claimedChannels.size}`).catch(() => {});
     }
 });
 
 setInterval(() => {
     if (!client.user) return;
     const statuses = ['online', 'idle', 'dnd'];
-    client.user.setPresence({ status: statuses[Math.floor(Math.random() * statuses.length)] });
+    client.user.setStatus(statuses[Math.floor(Math.random() * statuses.length)]);
 }, 300000);
 
-client.on(Events.Error, error => console.log(`[WS ERROR] ${error.message}`));
+client.on(Events.Error, error => console.log(`[WS] ${error.message}`));
 client.on(Events.Disconnect, () => {
     console.log('[DISCONNECT] Reconnecting...');
     setTimeout(() => client.login(TOKEN), 5000);
 });
 
 client.login(TOKEN).catch(err => {
-    console.log(`[LOGIN ERROR] ${err.message}`);
+    console.log(`[LOGIN] ${err.message}`);
     process.exit(1);
 });
