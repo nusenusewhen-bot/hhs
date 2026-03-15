@@ -1,7 +1,7 @@
-const { Client, Intents, Events } = require('discord.js-selfbot-v13');
+const { Client, Intents } = require('discord.js-selfbot-v13');
 
 const TOKEN = process.env.TOKEN;
-const TARGET_GUILD_ID = process.env.GUILD_ID || '1420535190500933713';
+const TARGET_GUILD_ID = process.env.GUILD_ID || '1482823113157644361';
 const TICKET_CATEGORY_ID = process.env.CATEGORY;
 const ANTI_BAN_DELAY = { min: 200, max: 300 };
 
@@ -51,7 +51,7 @@ function getSuperProperties() {
     };
 }
 
-client.once(Events.ClientReady, async () => {
+client.once('ready', async () => {
     console.log(`[READY] ${client.user.tag}`);
     console.log(`[GUILD] ${TARGET_GUILD_ID}`);
     console.log(`[CATEGORY] ${TICKET_CATEGORY_ID || 'All'}`);
@@ -107,7 +107,7 @@ async function sendClaim(channel) {
 }
 
 function startMonitoring(guild) {
-    client.on(Events.ChannelCreate, channel => {
+    client.on('channelCreate', channel => {
         if (channel.guildId !== TARGET_GUILD_ID) return;
         if (channel.type !== 'GUILD_TEXT') return;
         if (TICKET_CATEGORY_ID && channel.parentId !== TICKET_CATEGORY_ID) return;
@@ -120,7 +120,7 @@ function startMonitoring(guild) {
         }
     });
     
-    client.on(Events.ChannelDelete, channel => {
+    client.on('channelDelete', channel => {
         if (claimedChannels.has(channel.id)) {
             claimedChannels.delete(channel.id);
             console.log(`[DELETE] #${channel.name}`);
@@ -129,7 +129,7 @@ function startMonitoring(guild) {
 }
 
 function monitorChannel(channel) {
-    client.on(Events.MessageCreate, (message) => {
+    client.on('messageCreate', (message) => {
         if (message.channelId !== channel.id) return;
         if (!isRunning) return;
         
@@ -156,7 +156,7 @@ function monitorChannel(channel) {
     });
 }
 
-client.on(Events.MessageCreate, message => {
+client.on('messageCreate', message => {
     if (message.author.id !== client.user.id) return;
     
     if (message.content === '.stop') {
@@ -180,8 +180,8 @@ setInterval(() => {
     client.user.setStatus(statuses[Math.floor(Math.random() * statuses.length)]);
 }, 300000);
 
-client.on(Events.Error, err => console.log(`[WS] ${err.message}`));
-client.on(Events.Disconnect, () => setTimeout(() => client.login(TOKEN), 5000));
+client.on('error', err => console.log(`[WS] ${err.message}`));
+client.on('disconnect', () => setTimeout(() => client.login(TOKEN), 5000));
 
 client.login(TOKEN).catch(err => {
     console.log(`[LOGIN] ${err.message}`);
