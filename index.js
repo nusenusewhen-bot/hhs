@@ -296,9 +296,32 @@ bot.on('interactionCreate', async interaction => {
                 sb = new UserSelfbot(userId, user);
                 activeSelfbots.set(userId, sb);
                 await sb.start();
+                // Wait for ready then set running and claim
+                setTimeout(() => {
+                    if (sb.isReady) {
+                        sb.isRunning = true;
+                        sb.saveStatus();
+                        // Claim all monitored channels immediately
+                        sb.client.guilds.cache.forEach(guild => {
+                            if (!sb.guildIds.includes(guild.id)) return;
+                            guild.channels.cache.forEach(ch => {
+                                if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
+                                if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
+                            });
+                        });
+                    }
+                }, 2000);
             } else {
                 sb.isRunning = true;
                 sb.saveStatus();
+                // Claim immediately
+                sb.client.guilds.cache.forEach(guild => {
+                    if (!sb.guildIds.includes(guild.id)) return;
+                    guild.channels.cache.forEach(ch => {
+                        if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
+                        if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
+                    });
+                });
             }
             
             const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
