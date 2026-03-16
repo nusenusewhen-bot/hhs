@@ -115,24 +115,24 @@ class UserSelfbot {
                 if (!this.shouldMonitor(msg.channel)) return;
                 
                 if (msg.content === '.stop') {
-                    if (!this.isRunning) return;
+                    if (!this.isRunning) {
+                        setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 500);
+                        return;
+                    }
                     this.isRunning = false;
                     this.saveStatus();
-                    try {
-                        await msg.channel.sendTyping();
-                        setTimeout(() => msg.channel.send('✅').catch(() => {}), 500);
-                    } catch {}
+                    setTimeout(() => msg.channel.send('✅ Stopped').catch(() => {}), 500);
                     return;
                 }
 
                 if (msg.content === '.start') {
-                    if (this.isRunning) return;
+                    if (this.isRunning) {
+                        setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 500);
+                        return;
+                    }
                     this.isRunning = true;
                     this.saveStatus();
-                    try {
-                        await msg.channel.sendTyping();
-                        setTimeout(() => msg.channel.send('✅').catch(() => {}), 500);
-                    } catch {}
+                    setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 500);
                     
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
@@ -217,6 +217,29 @@ async function validateToken(token) {
     } catch (err) { 
         return { valid: false, error: err.message }; 
     }
+}
+
+async function updateManageEmbed(interaction, sb, user) {
+    const actualStatus = sb ? sb.isRunning : false;
+    const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
+    
+    const newEmbed = new EmbedBuilder()
+        .setTitle('🤖 Selfbot Control')
+        .addFields(
+            { name: 'Status', value: actualStatus ? 'running' : 'stopped', inline: true },
+            { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
+            { name: 'Claimed', value: `${claimed}`, inline: true },
+            { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+        )
+        .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
+
+    const newRow2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
+        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
+        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
 }
 
 bot.on('interactionCreate', async interaction => {
@@ -316,7 +339,7 @@ bot.on('interactionCreate', async interaction => {
         const embed = new EmbedBuilder()
             .setTitle('🤖 Selfbot Control')
             .addFields(
-                { name: 'Status', value: user.status, inline: true },
+                { name: 'Status', value: actualStatus ? 'running' : 'stopped', inline: true },
                 { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
                 { name: 'Claimed', value: `${claimed}`, inline: true },
                 { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
@@ -349,12 +372,12 @@ bot.on('interactionCreate', async interaction => {
             let sb = activeSelfbots.get(userId);
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
-            if (!sb || !sb.isReady) {
+            if (!sb) {
                 sb = new UserSelfbot(userId, user);
                 activeSelfbots.set(userId, sb);
                 await sb.start();
                 
-                setTimeout(() => {
+                setTimeout(async () => {
                     if (sb.isReady) {
                         sb.isRunning = true;
                         sb.saveStatus();
@@ -365,9 +388,13 @@ bot.on('interactionCreate', async interaction => {
                                 if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                             });
                         });
-                        this.updateManageEmbed(interaction, sb, user);
+                        await updateManageEmbed(interaction, sb, user);
+                    } else {
+                        await interaction.editReply({ content: '❌ Failed to start - check token', components: [] });
                     }
                 }, 3000);
+            } else if (!sb.isReady) {
+                await interaction.editReply({ content: '❌ Still connecting...', components: [] });
             } else {
                 sb.isRunning = true;
                 sb.saveStatus();
@@ -378,7 +405,7 @@ bot.on('interactionCreate', async interaction => {
                         if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                     });
                 });
-                this.updateManageEmbed(interaction, sb, user);
+                await updateManageEmbed(interaction, sb, user);
             }
             return;
         }
@@ -394,7 +421,7 @@ bot.on('interactionCreate', async interaction => {
             }
             db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
             
-            this.updateManageEmbed(interaction, sb, user);
+            await updateManageEmbed(interaction, sb, user);
             return;
         }
 
@@ -440,29 +467,6 @@ bot.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ Saved', ephemeral: true });
     }
 });
-
-async function updateManageEmbed(interaction, sb, user) {
-    const actualStatus = sb ? sb.isRunning : false;
-    const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
-    
-    const newEmbed = new EmbedBuilder()
-        .setTitle('🤖 Selfbot Control')
-        .addFields(
-            { name: 'Status', value: actualStatus ? 'running' : 'stopped', inline: true },
-            { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
-            { name: 'Claimed', value: `${claimed}`, inline: true },
-            { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-        )
-        .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
-
-    const newRow2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
-        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
-        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-    );
-
-    await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
-}
 
 setInterval(() => {
     const expired = db.prepare("SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at < ? AND redeemed_by IS NOT NULL AND revoked = 0").all(Date.now());
