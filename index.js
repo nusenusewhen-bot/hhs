@@ -1,7 +1,6 @@
 const { Client: BotClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder, Events } = require('discord.js');
 const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
 const Database = require('better-sqlite3');
-const superProps = require('./superprops.js');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OWNER_ID = '1422945082746601594';
@@ -26,22 +25,47 @@ function parseDuration(input) {
     return ms[unit] || null;
 }
 
+function getSuperProperties() {
+    return {
+        os: 'Linux',
+        browser: 'Discord Android',
+        device: 'SM-G998B',
+        system_locale: 'en-US',
+        browser_user_agent: 'Discord-Android/205000',
+        os_version: '33',
+        client_build_number: 205000,
+        client_version: '205.0',
+        country_code: 'US',
+        geo_ordered_rtc_regions: ['us-west', 'us-central', 'us-east'],
+        timezone_offset: -420,
+        locale: 'en-US',
+        client_city: 'Los Angeles',
+        client_region: 'California',
+        client_country: 'United States',
+        client_latitude: 34.05,
+        client_longitude: -118.24,
+        client_isp: 'T-Mobile USA',
+        client_timezone: 'America/Los_Angeles',
+        client_architecture: 'arm64',
+        client_app_platform: 'android',
+        client_distribution_type: 'google_play'
+    };
+}
+
 class UserSelfbot {
     constructor(userId, config) {
         this.userId = userId;
         this.config = config;
         this.client = null;
-        this.isRunning = config.status === 'running';
+        this.isRunning = false;
         this.isReady = false;
         this.claimedChannels = new Set(JSON.parse(config.claimed_tickets || '[]'));
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
-        this.messageListener = null;
-        this.restPatchApplied = false;
     }
 
     randomDelay() {
-        return Math.floor(Math.random() * 200) + 300;
+        return Math.floor(Math.random() * 100) + 200;
     }
 
     saveClaimed() {
@@ -58,92 +82,46 @@ class UserSelfbot {
         return this.categoryIds.includes(channel.parentId);
     }
 
-    patchRestApi() {
-        if (this.restPatchApplied || !this.client) return;
-        
-        const props = superProps.getSuperProperties();
-        const originalRequest = this.client.rest.request.bind(this.client.rest);
-        
-        this.client.rest.request = async (options) => {
-            if (!options.headers) options.headers = {};
-            
-            options.headers['X-Discord-Locale'] = props.locale || 'nb-NO';
-            options.headers['X-Discord-Timezone'] = props.client_timezone || 'Europe/Oslo';
-            options.headers['X-Debug-Options'] = 'bugReporterEnabled';
-            options.headers['X-Discord-Referrer'] = '';
-            options.headers['Referer'] = `https://discord.com/channels/${options.fullRoute?.includes('channels') ? options.fullRoute.split('/')[1] : '@me'}`;
-            options.headers['sec-ch-ua'] = '"Not_A Brand";v="8", "Chromium";v="120"';
-            options.headers['sec-ch-ua-mobile'] = '?1';
-            options.headers['sec-ch-ua-platform'] = '"iOS"';
-            options.headers['sec-fetch-dest'] = 'empty';
-            options.headers['sec-fetch-mode'] = 'cors';
-            options.headers['sec-fetch-site'] = 'same-origin';
-            
-            return originalRequest(options);
-        };
-        
-        this.restPatchApplied = true;
-    }
-
     async start() {
         if (!this.config.token || this.client) return;
         
-        const props = superProps.getSuperProperties();
+        const props = getSuperProperties();
         
         this.client = new SelfbotClient({ 
             checkUpdate: false,
             restRequestTimeout: 30000,
-            restGlobalRateLimitReset: 1000,
             rest: {
                 api: 'https://discord.com/api/v9',
-                cdn: 'https://cdn.discordapp.com',
-                invite: 'https://discord.gg',
-                template: 'https://discord.new',
                 headers: {
-                    'Accept-Language': 'nb-NO,nb;q=0.9',
+                    'Accept-Language': 'en-US',
                     'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache'
+                    'X-Discord-Locale': props.locale,
+                    'X-Discord-Timezone': props.client_timezone,
+                    'X-Debug-Options': 'bugReporterEnabled'
                 }
             },
             ws: { 
-                properties: {
-                    os: props.os,
-                    browser: props.browser,
-                    device: props.device,
-                    browser_user_agent: props.browser_user_agent,
-                    os_version: props.os_version,
-                    client_build_number: props.client_build_number,
-                    client_version: props.client_version,
-                    system_locale: props.system_locale,
-                    country_code: props.country_code
-                },
-                compress: true,
-                large_threshold: 250
-            },
-            http: {
-                headers: {
-                    'Accept-Encoding': 'gzip, deflate, br'
-                }
-            },
-            messageCacheMaxSize: 100,
-            messageCacheLifetime: 300,
-            messageSweepInterval: 300
+                properties: props,
+                compress: true
+            }
         });
 
         this.client.once('ready', () => {
             this.isReady = true;
-            this.patchRestApi();
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            this.messageListener = async (msg) => {
+            this.client.on('messageCreate', async (msg) => {
                 if (msg.author.id !== this.client.user.id) return;
+                if (!this.shouldMonitor(msg.channel)) return;
                 
                 if (msg.content === '.stop') {
                     if (!this.isRunning) return;
                     this.isRunning = false;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Stopped').catch(() => {}), 1000);
+                    try {
+                        await msg.channel.sendTyping();
+                        setTimeout(() => msg.channel.send('✅').catch(() => {}), 500);
+                    } catch {}
                     return;
                 }
 
@@ -151,16 +129,17 @@ class UserSelfbot {
                     if (this.isRunning) return;
                     this.isRunning = true;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 1000);
+                    try {
+                        await msg.channel.sendTyping();
+                        setTimeout(() => msg.channel.send('✅').catch(() => {}), 500);
+                    } catch {}
                     
-                    if (!this.claimedChannels.has(msg.channelId) && this.shouldMonitor(msg.channel)) {
+                    if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
                     }
                     return;
                 }
-            };
-            
-            this.client.on('messageCreate', this.messageListener);
+            });
 
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
@@ -211,39 +190,20 @@ class UserSelfbot {
         
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
-            
-            if (!this.restPatchApplied) this.patchRestApi();
-            
             await channel.send(this.config.claim_cmd || '.claim');
             console.log(`[CLAIMED] ${channel.name} (${channel.id}) by ${this.userId}`);
         } catch (err) {
             console.error(`[CLAIM FAIL] ${channel.id}: ${err.message}`);
-            if (err.message.includes('401')) {
-                console.error(`[TOKEN INVALID] Token may be flagged for ${this.userId}`);
-            }
         }
     }
 
     destroy() {
         if (this.client) { 
-            if (this.messageListener) this.client.removeListener('messageCreate', this.messageListener);
             this.client.destroy(); 
             this.client = null; 
         }
         this.isReady = false;
         this.isRunning = false;
-        this.restPatchApplied = false;
-    }
-
-    updateFromDB() {
-        const user = db.prepare('SELECT status FROM users WHERE user_id = ?').get(this.userId);
-        if (!user) return false;
-        const shouldRun = user.status === 'running';
-        if (shouldRun !== this.isRunning) { 
-            this.isRunning = shouldRun; 
-            return true; 
-        }
-        return false;
     }
 }
 
@@ -405,6 +365,7 @@ bot.on('interactionCreate', async interaction => {
                                 if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                             });
                         });
+                        this.updateManageEmbed(interaction, sb, user);
                     }
                 }, 3000);
             } else {
@@ -417,24 +378,8 @@ bot.on('interactionCreate', async interaction => {
                         if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                     });
                 });
+                this.updateManageEmbed(interaction, sb, user);
             }
-            
-            const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                .spliceFields(0, 4, 
-                    { name: 'Status', value: 'running', inline: true },
-                    { name: 'Live', value: '✅', inline: true },
-                    { name: 'Claimed', value: `${sb?.claimedChannels?.size || 0}`, inline: true },
-                    { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                )
-                .setColor(0x00FF00);
-
-            const newRow2 = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
-                new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
-                new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-            );
-
-            await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
             return;
         }
 
@@ -443,25 +388,13 @@ bot.on('interactionCreate', async interaction => {
             const sb = activeSelfbots.get(userId);
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
+            if (sb) {
+                sb.isRunning = false;
+                sb.saveStatus();
+            }
             db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
-            if (sb) { sb.isRunning = false; sb.saveStatus(); }
             
-            const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                .spliceFields(0, 4,
-                    { name: 'Status', value: 'stopped', inline: true },
-                    { name: 'Live', value: '❌', inline: true },
-                    { name: 'Claimed', value: `${sb?.claimedChannels?.size || JSON.parse(user.claimed_tickets || '[]').length}`, inline: true },
-                    { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                )
-                .setColor(0xFF0000);
-
-            const newRow2 = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(false),
-                new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(true),
-                new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-            );
-
-            await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+            this.updateManageEmbed(interaction, sb, user);
             return;
         }
 
@@ -507,6 +440,29 @@ bot.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ Saved', ephemeral: true });
     }
 });
+
+async function updateManageEmbed(interaction, sb, user) {
+    const actualStatus = sb ? sb.isRunning : false;
+    const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
+    
+    const newEmbed = new EmbedBuilder()
+        .setTitle('🤖 Selfbot Control')
+        .addFields(
+            { name: 'Status', value: actualStatus ? 'running' : 'stopped', inline: true },
+            { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
+            { name: 'Claimed', value: `${claimed}`, inline: true },
+            { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+        )
+        .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
+
+    const newRow2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
+        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
+        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+}
 
 setInterval(() => {
     const expired = db.prepare("SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at < ? AND redeemed_by IS NOT NULL AND revoked = 0").all(Date.now());
