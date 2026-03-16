@@ -58,29 +58,7 @@ class UserSelfbot {
     async start() {
         if (!this.config.token || this.client) return;
         
-        this.client = new SelfbotClient({ 
-            checkUpdate: false,
-            ws: { 
-                properties: { 
-                    os: 'Windows', 
-                    browser: 'Chrome', 
-                    device: '', 
-                    browser_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 
-                    os_version: '10', 
-                    client_build_number: 9999 
-                },
-                large_threshold: 100,
-                compress: true
-            },
-            rest: {
-                api: 'https://discord.com/api/v9',
-                globalTimeout: 5000,
-                retries: 1
-            },
-            messageCacheMaxSize: 10,
-            messageCacheLifetime: 30,
-            messageSweepInterval: 30
-        });
+        this.client = new SelfbotClient({ checkUpdate: false, ws: { properties: { os: 'Windows', browser: 'Chrome', device: '', browser_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', os_version: '10', client_build_number: 9999 } } });
 
         this.client.once('ready', () => {
             this.isReady = true;
@@ -99,23 +77,23 @@ class UserSelfbot {
 
                 if (msg.content === '.stop') {
                     if (!this.isRunning) {
-                        setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 100);
+                        setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = false;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Stopped').catch(() => {}), 100);
+                    setTimeout(() => msg.channel.send('✅ Stopped').catch(() => {}), 500);
                     return;
                 }
 
                 if (msg.content === '.start') {
                     if (this.isRunning) {
-                        setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 100);
+                        setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = true;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 100);
+                    setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 500);
                     
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
@@ -126,7 +104,7 @@ class UserSelfbot {
                 if (!this.isRunning || this.claimedChannels.has(msg.channelId)) return;
                 
                 try {
-                    const msgs = await msg.channel.messages.fetch({ limit: 3 });
+                    const msgs = await msg.channel.messages.fetch({ limit: 5 });
                     if (!msgs.some(m => m.content === this.config.claim_cmd)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
                     } else {
@@ -173,6 +151,7 @@ class UserSelfbot {
         this.claimedChannels.add(channel.id);
         this.saveClaimed();
         try {
+            await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
         } catch {}
     }
@@ -336,10 +315,8 @@ bot.on('interactionCreate', async interaction => {
                 activeSelfbots.set(userId, sb);
                 await sb.start();
                 
-                const waitForReady = setInterval(async () => {
+                setTimeout(async () => {
                     if (sb.isReady) {
-                        clearInterval(waitForReady);
-                        
                         sb.isRunning = true;
                         sb.saveStatus();
                         
@@ -368,11 +345,7 @@ bot.on('interactionCreate', async interaction => {
 
                         await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
                     }
-                }, 100);
-                
-                setTimeout(() => clearInterval(waitForReady), 5000);
-            } else if (!sb.isReady) {
-                await interaction.editReply({ content: '❌ Still connecting...', components: [] });
+                }, 3000);
             } else {
                 sb.isRunning = true;
                 sb.saveStatus();
