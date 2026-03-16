@@ -38,7 +38,7 @@ class UserSelfbot {
     }
 
     randomDelay() {
-        return Math.floor(Math.random() * 100) + 200;
+        return 450;
     }
 
     saveClaimed() {
@@ -51,8 +51,8 @@ class UserSelfbot {
 
     shouldMonitor(channel) {
         if (!this.guildIds.includes(channel.guildId)) return false;
-        if (this.categoryIds.length === 0) return true;
-        return this.categoryIds.includes(channel.parentId);
+        if (this.categoryIds.length > 0 && !this.categoryIds.includes(channel.parentId)) return false;
+        return true;
     }
 
     async start() {
@@ -64,14 +64,10 @@ class UserSelfbot {
             this.isReady = true;
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            // FIX: Single message listener for ALL channels, not per-channel
             this.client.on('messageCreate', async (msg) => {
-                // Only process in monitored channels
                 if (!this.shouldMonitor(msg.channel)) return;
                 
-                // Only process self messages
                 if (msg.author.id !== this.client.user.id) {
-                    // Check if someone else claimed
                     if (msg.content === this.config.claim_cmd && !this.claimedChannels.has(msg.channelId)) {
                         this.claimedChannels.add(msg.channelId);
                         this.saveClaimed();
@@ -79,7 +75,6 @@ class UserSelfbot {
                     return;
                 }
 
-                // Handle .stop
                 if (msg.content === '.stop') {
                     if (!this.isRunning) {
                         setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 500);
@@ -91,7 +86,6 @@ class UserSelfbot {
                     return;
                 }
 
-                // Handle .start
                 if (msg.content === '.start') {
                     if (this.isRunning) {
                         setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 500);
@@ -101,14 +95,12 @@ class UserSelfbot {
                     this.saveStatus();
                     setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 500);
                     
-                    // Claim this channel if not claimed
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
                     }
                     return;
                 }
 
-                // Auto-claim logic for new messages
                 if (!this.isRunning || this.claimedChannels.has(msg.channelId)) return;
                 
                 try {
@@ -122,7 +114,6 @@ class UserSelfbot {
                 } catch {}
             });
 
-            // Initial scan
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
                 guild.channels.cache.forEach(ch => {
@@ -319,57 +310,77 @@ bot.on('interactionCreate', async interaction => {
             let sb = activeSelfbots.get(userId);
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
-            // Create and start if not exists
             if (!sb) {
                 sb = new UserSelfbot(userId, user);
                 activeSelfbots.set(userId, sb);
                 await sb.start();
-            }
-            
-            // If already exists but not ready, start it
-            if (!sb.isReady && !sb.client) {
-                await sb.start();
-            }
-            
-            // Wait for ready then enable
-            const waitForReady = setInterval(async () => {
-                if (sb.isReady) {
-                    clearInterval(waitForReady);
-                    
-                    sb.isRunning = true;
-                    sb.saveStatus();
-                    
-                    // Claim all monitored channels
-                    sb.client.guilds.cache.forEach(guild => {
-                        if (!sb.guildIds.includes(guild.id)) return;
-                        guild.channels.cache.forEach(ch => {
-                            if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
-                            if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
+                
+                const waitForReady = setInterval(async () => {
+                    if (sb.isReady) {
+                        clearInterval(waitForReady);
+                        
+                        sb.isRunning = true;
+                        sb.saveStatus();
+                        
+                        sb.client.guilds.cache.forEach(guild => {
+                            if (!sb.guildIds.includes(guild.id)) return;
+                            guild.channels.cache.forEach(ch => {
+                                if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
+                                if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
+                            });
                         });
+                        
+                        const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+                            .spliceFields(0, 4, 
+                                { name: 'Status', value: 'running', inline: true },
+                                { name: 'Live', value: '✅', inline: true },
+                                { name: 'Claimed', value: `${sb.claimedChannels.size}`, inline: true },
+                                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+                            )
+                            .setColor(0x00FF00);
+
+                        const newRow2 = new ActionRowBuilder().addComponents(
+                            new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
+                            new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
+                            new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+                        );
+
+                        await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+                    }
+                }, 500);
+                
+                setTimeout(() => clearInterval(waitForReady), 10000);
+            } else if (!sb.isReady) {
+                await interaction.editReply({ content: '❌ Still connecting...', components: [] });
+            } else {
+                sb.isRunning = true;
+                sb.saveStatus();
+                
+                sb.client.guilds.cache.forEach(guild => {
+                    if (!sb.guildIds.includes(guild.id)) return;
+                    guild.channels.cache.forEach(ch => {
+                        if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
+                        if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                     });
-                    
-                    // Update embed
-                    const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                        .spliceFields(0, 4, 
-                            { name: 'Status', value: 'running', inline: true },
-                            { name: 'Live', value: '✅', inline: true },
-                            { name: 'Claimed', value: `${sb.claimedChannels.size}`, inline: true },
-                            { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                        )
-                        .setColor(0x00FF00);
+                });
+                
+                const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+                    .spliceFields(0, 4, 
+                        { name: 'Status', value: 'running', inline: true },
+                        { name: 'Live', value: '✅', inline: true },
+                        { name: 'Claimed', value: `${sb.claimedChannels.size}`, inline: true },
+                        { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+                    )
+                    .setColor(0x00FF00);
 
-                    const newRow2 = new ActionRowBuilder().addComponents(
-                        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
-                        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
-                        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-                    );
+                const newRow2 = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
+                    new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
+                    new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+                );
 
-                    await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
-                }
-            }, 500);
-            
-            // Timeout after 10s
-            setTimeout(() => clearInterval(waitForReady), 10000);
+                await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+            }
             return;
         }
 
@@ -404,10 +415,15 @@ bot.on('interactionCreate', async interaction => {
         }
 
         if (interaction.customId === 'reset') {
-            db.prepare('UPDATE users SET claimed_tickets = ? WHERE user_id = ?').run('[]', userId);
             const sb = activeSelfbots.get(userId);
-            if (sb) sb.claimedChannels.clear();
-            await interaction.reply({ content: '✅ Reset', ephemeral: true });
+            if (sb) { 
+                sb.destroy(); 
+                activeSelfbots.delete(userId); 
+            }
+            
+            db.prepare('UPDATE users SET token = NULL, guild_ids = NULL, category_ids = NULL, claimed_tickets = "[]", status = "stopped" WHERE user_id = ?').run(userId);
+            
+            await interaction.reply({ content: '✅ Reset complete! Set new Token, Guilds, and Categories to start again.', ephemeral: true });
             return;
         }
 
