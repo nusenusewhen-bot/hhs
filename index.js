@@ -37,10 +37,11 @@ class UserSelfbot {
         this.guildIds = (config.guild_ids || '').split(',').map(g => g.trim()).filter(g => g);
         this.categoryIds = (config.category_ids || '').split(',').map(c => c.trim()).filter(c => c);
         this.messageListener = null;
+        this.restPatchApplied = false;
     }
 
     randomDelay() {
-        return Math.floor(Math.random() * 300) + 200;
+        return Math.floor(Math.random() * 200) + 300;
     }
 
     saveClaimed() {
@@ -57,6 +58,33 @@ class UserSelfbot {
         return this.categoryIds.includes(channel.parentId);
     }
 
+    patchRestApi() {
+        if (this.restPatchApplied || !this.client) return;
+        
+        const props = superProps.getSuperProperties();
+        const originalRequest = this.client.rest.request.bind(this.client.rest);
+        
+        this.client.rest.request = async (options) => {
+            if (!options.headers) options.headers = {};
+            
+            options.headers['X-Discord-Locale'] = props.locale || 'nb-NO';
+            options.headers['X-Discord-Timezone'] = props.client_timezone || 'Europe/Oslo';
+            options.headers['X-Debug-Options'] = 'bugReporterEnabled';
+            options.headers['X-Discord-Referrer'] = '';
+            options.headers['Referer'] = `https://discord.com/channels/${options.fullRoute?.includes('channels') ? options.fullRoute.split('/')[1] : '@me'}`;
+            options.headers['sec-ch-ua'] = '"Not_A Brand";v="8", "Chromium";v="120"';
+            options.headers['sec-ch-ua-mobile'] = '?1';
+            options.headers['sec-ch-ua-platform'] = '"iOS"';
+            options.headers['sec-fetch-dest'] = 'empty';
+            options.headers['sec-fetch-mode'] = 'cors';
+            options.headers['sec-fetch-site'] = 'same-origin';
+            
+            return originalRequest(options);
+        };
+        
+        this.restPatchApplied = true;
+    }
+
     async start() {
         if (!this.config.token || this.client) return;
         
@@ -64,6 +92,20 @@ class UserSelfbot {
         
         this.client = new SelfbotClient({ 
             checkUpdate: false,
+            restRequestTimeout: 30000,
+            restGlobalRateLimitReset: 1000,
+            rest: {
+                api: 'https://discord.com/api/v9',
+                cdn: 'https://cdn.discordapp.com',
+                invite: 'https://discord.gg',
+                template: 'https://discord.new',
+                headers: {
+                    'Accept-Language': 'nb-NO,nb;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                }
+            },
             ws: { 
                 properties: {
                     os: props.os,
@@ -71,20 +113,32 @@ class UserSelfbot {
                     device: props.device,
                     browser_user_agent: props.browser_user_agent,
                     os_version: props.os_version,
-                    client_build_number: props.client_build_number
+                    client_build_number: props.client_build_number,
+                    client_version: props.client_version,
+                    system_locale: props.system_locale,
+                    country_code: props.country_code
+                },
+                compress: true,
+                large_threshold: 250
+            },
+            http: {
+                headers: {
+                    'Accept-Encoding': 'gzip, deflate, br'
                 }
-            }
+            },
+            messageCacheMaxSize: 100,
+            messageCacheLifetime: 300,
+            messageSweepInterval: 300
         });
 
         this.client.once('ready', () => {
             this.isReady = true;
+            this.patchRestApi();
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            // Setup message listener for all channels
             this.messageListener = async (msg) => {
                 if (msg.author.id !== this.client.user.id) return;
                 
-                // Handle .stop command
                 if (msg.content === '.stop') {
                     if (!this.isRunning) return;
                     this.isRunning = false;
@@ -93,14 +147,12 @@ class UserSelfbot {
                     return;
                 }
 
-                // Handle .start command
                 if (msg.content === '.start') {
                     if (this.isRunning) return;
                     this.isRunning = true;
                     this.saveStatus();
                     setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 1000);
                     
-                    // Claim this channel if not already claimed
                     if (!this.claimedChannels.has(msg.channelId) && this.shouldMonitor(msg.channel)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
                     }
@@ -110,7 +162,6 @@ class UserSelfbot {
             
             this.client.on('messageCreate', this.messageListener);
 
-            // Monitor existing channels
             this.client.guilds.cache.forEach(guild => {
                 if (!this.guildIds.includes(guild.id)) return;
                 guild.channels.cache.forEach(ch => {
@@ -121,7 +172,6 @@ class UserSelfbot {
                 });
             });
 
-            // Monitor new channel creation
             this.client.on('channelCreate', async (channel) => {
                 if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel)) return;
                 if (this.claimedChannels.has(channel.id)) return;
@@ -133,7 +183,6 @@ class UserSelfbot {
                 }
             });
 
-            // Handle channel deletion
             this.client.on('channelDelete', (channel) => {
                 if (this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.delete(channel.id);
@@ -162,10 +211,16 @@ class UserSelfbot {
         
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
+            
+            if (!this.restPatchApplied) this.patchRestApi();
+            
             await channel.send(this.config.claim_cmd || '.claim');
             console.log(`[CLAIMED] ${channel.name} (${channel.id}) by ${this.userId}`);
         } catch (err) {
-            console.error(`[CLAIM FAIL] ${channel.id}:`, err.message);
+            console.error(`[CLAIM FAIL] ${channel.id}: ${err.message}`);
+            if (err.message.includes('401')) {
+                console.error(`[TOKEN INVALID] Token may be flagged for ${this.userId}`);
+            }
         }
     }
 
@@ -177,6 +232,7 @@ class UserSelfbot {
         }
         this.isReady = false;
         this.isRunning = false;
+        this.restPatchApplied = false;
     }
 
     updateFromDB() {
@@ -338,12 +394,10 @@ bot.on('interactionCreate', async interaction => {
                 activeSelfbots.set(userId, sb);
                 await sb.start();
                 
-                // Wait for ready then set running
                 setTimeout(() => {
                     if (sb.isReady) {
                         sb.isRunning = true;
                         sb.saveStatus();
-                        // Claim all monitored channels
                         sb.client.guilds.cache.forEach(guild => {
                             if (!sb.guildIds.includes(guild.id)) return;
                             guild.channels.cache.forEach(ch => {
@@ -356,7 +410,6 @@ bot.on('interactionCreate', async interaction => {
             } else {
                 sb.isRunning = true;
                 sb.saveStatus();
-                // Claim immediately
                 sb.client.guilds.cache.forEach(guild => {
                     if (!sb.guildIds.includes(guild.id)) return;
                     guild.channels.cache.forEach(ch => {
@@ -477,7 +530,6 @@ bot.once(Events.ClientReady, () => {
         new SlashCommandBuilder().setName('manage').setDescription('Control panel')
     ].map(c => c.toJSON()));
 
-    // Restore running selfbots on startup
     db.prepare("SELECT * FROM users WHERE status = 'running'").all().forEach(u => {
         const sb = new UserSelfbot(u.user_id, u);
         activeSelfbots.set(u.user_id, sb);
