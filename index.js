@@ -1,4 +1,4 @@
-const { Client: BotClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { Client: BotClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder } = require('discord.js');
 const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
 const Database = require('better-sqlite3');
 
@@ -7,13 +7,57 @@ const OWNER_ID = '1422945082746601594';
 
 const db = new Database('./data.db');
 db.exec(`
-    CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, created_at INTEGER, redeemed_by TEXT, redeemed_at INTEGER);
-    CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, token TEXT, claim_cmd TEXT DEFAULT '.claim', guild_ids TEXT, category_ids TEXT, status TEXT DEFAULT 'stopped', claimed_tickets TEXT DEFAULT '[]');
+    CREATE TABLE IF NOT EXISTS keys (
+        key TEXT PRIMARY KEY, 
+        created_at INTEGER, 
+        redeemed_by TEXT, 
+        redeemed_at INTEGER,
+        expires_at INTEGER,
+        revoked INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY, 
+        token TEXT, 
+        claim_cmd TEXT DEFAULT '.claim', 
+        guild_ids TEXT, 
+        category_ids TEXT, 
+        status TEXT DEFAULT 'stopped', 
+        claimed_tickets TEXT DEFAULT '[]'
+    );
 `);
 
 const bot = new BotClient({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages] });
 
 const activeSelfbots = new Map();
+
+function parseDuration(input) {
+    if (!input) return null;
+    const match = input.match(/^(\d+)([hmd])$/i);
+    if (!match) return null;
+    
+    const num = parseInt(match[1]);
+    const unit = match[2].toLowerCase();
+    
+    const ms = {
+        'm': num * 60 * 1000,        // minutes
+        'h': num * 60 * 60 * 1000,   // hours
+        'd': num * 24 * 60 * 60 * 1000 // days
+    };
+    
+    return ms[unit] || null;
+}
+
+function formatDuration(ms) {
+    if (!ms) return 'Lifetime';
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) return `${days}d`;
+    if (hours > 0) return `${hours}h`;
+    return `${minutes}m`;
+}
 
 class UserSelfbot {
     constructor(userId, config) {
@@ -38,6 +82,7 @@ class UserSelfbot {
 
     saveStatus() {
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run(this.isRunning ? 'running' : 'stopped', this.userId);
+        console.log(`[DB] ${this.userId} status -> ${this.isRunning ? 'running' : 'stopped'}`);
     }
 
     shouldMonitor(channel) {
@@ -48,7 +93,7 @@ class UserSelfbot {
 
     async start() {
         if (!this.config.token) {
-            console.log(`[ERROR] ${this.userId} No token provided`);
+            console.log(`[ERROR] ${this.userId} No token`);
             return;
         }
         
@@ -57,7 +102,7 @@ class UserSelfbot {
             return;
         }
 
-        console.log(`[LOGIN] ${this.userId} Attempting login...`);
+        console.log(`[LOGIN] ${this.userId} Starting...`);
         
         this.client = new SelfbotClient({ 
             checkUpdate: false,
@@ -75,67 +120,32 @@ class UserSelfbot {
 
         this.client.once('ready', () => {
             this.isReady = true;
-            console.log(`[READY] ${this.userId} Logged in as ${this.client.user.tag}`);
+            console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
-            // Check guilds
-            console.log(`[GUILDS] ${this.userId} Available:`, this.client.guilds.cache.map(g => `${g.name}(${g.id})`).join(', '));
-            
-            // Setup existing channels
-            let monitoredCount = 0;
             this.client.guilds.cache.forEach(guild => {
-                if (!this.guildIds.includes(guild.id)) {
-                    console.log(`[SKIP] Guild ${guild.id} not in list`);
-                    return;
-                }
+                if (!this.guildIds.includes(guild.id)) return;
                 
                 guild.channels.cache.forEach(ch => {
-                    if (ch.type !== 'GUILD_TEXT') return;
-                    if (!this.shouldMonitor(ch)) {
-                        console.log(`[SKIP] Channel ${ch.name} - category mismatch`);
-                        return;
-                    }
+                    if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
                     
-                    console.log(`[SETUP] Existing #${ch.name} (${ch.id})`);
+                    console.log(`[SETUP] #${ch.name}`);
                     this.setupChannel(ch);
-                    monitoredCount++;
                     
                     if (this.isRunning && !this.claimedChannels.has(ch.id)) {
-                        console.log(`[AUTO] Will claim #${ch.name}`);
                         setTimeout(() => this.claim(ch), this.randomDelay());
                     }
                 });
             });
-            
-            console.log(`[INIT] ${this.userId} Monitoring ${monitoredCount} channels`);
 
-            // Listen for new channels
             this.client.on('channelCreate', channel => {
-                console.log(`[EVENT] channelCreate: #${channel.name} type=${channel.type} guild=${channel.guildId}`);
+                if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel)) return;
+                if (this.claimedChannels.has(channel.id)) return;
                 
-                if (channel.type !== 'GUILD_TEXT') {
-                    console.log(`[SKIP] Not a text channel`);
-                    return;
-                }
-                
-                if (!this.shouldMonitor(channel)) {
-                    console.log(`[SKIP] Category/Guild mismatch. Parent: ${channel.parentId}, Guild: ${channel.guildId}`);
-                    return;
-                }
-                
-                if (this.claimedChannels.has(channel.id)) {
-                    console.log(`[SKIP] Already claimed`);
-                    return;
-                }
-                
-                console.log(`[NEW] Setting up #${channel.name}`);
+                console.log(`[NEW] #${channel.name}`);
                 this.setupChannel(channel);
                 
                 if (this.isRunning) {
-                    const delay = this.randomDelay();
-                    console.log(`[CLAIM] Will claim #${channel.name} in ${delay}ms`);
-                    setTimeout(() => this.claim(channel), delay);
-                } else {
-                    console.log(`[PENDING] Not running, will claim when started`);
+                    setTimeout(() => this.claim(channel), this.randomDelay());
                 }
             });
 
@@ -143,65 +153,63 @@ class UserSelfbot {
                 if (this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.delete(channel.id);
                     this.saveClaimed();
-                    console.log(`[DELETE] Removed ${channel.id}`);
                 }
             });
         });
 
-        this.client.on('error', (err) => {
-            console.log(`[WS ERROR] ${this.userId}: ${err.message}`);
-        });
+        this.client.on('error', (err) => console.log(`[WS] ${err.message}`));
 
-        this.client.on('disconnect', () => {
-            console.log(`[DISCONNECT] ${this.userId}`);
-            this.isReady = false;
-        });
-
-        // Attempt login
         try {
             await this.client.login(this.config.token);
-            console.log(`[SUCCESS] ${this.userId} Login call completed`);
         } catch (err) {
-            console.log(`[LOGIN FAIL] ${this.userId}: ${err.message}`);
+            console.log(`[FAIL] ${this.userId}: ${err.message}`);
             this.client = null;
         }
     }
 
     setupChannel(channel) {
-        this.client.on('messageCreate', async (msg) => {
+        const handler = async (msg) => {
             if (msg.channelId !== channel.id) return;
+            
             if (msg.author.id !== this.client.user.id) {
-                // Detect others claiming
                 if (msg.content === this.config.claim_cmd && !this.claimedChannels.has(channel.id)) {
                     this.claimedChannels.add(channel.id);
                     this.saveClaimed();
-                    console.log(`[DETECTED] ${msg.author.tag} claimed #${channel.name}`);
                 }
                 return;
             }
 
-            // Handle commands
-            if (msg.content === '.stop') {
+            if (msg.content.trim() === '.stop') {
+                console.log(`[CMD] ${this.userId} .stop in #${channel.name}`);
+                
                 if (!this.isRunning) {
                     setTimeout(() => msg.channel.send('⏹️ Already stopped').catch(() => {}), 3000);
                     return;
                 }
+                
                 this.isRunning = false;
                 this.saveStatus();
-                console.log(`[CMD] .stop by ${this.userId} in #${channel.name}`);
-                setTimeout(() => msg.channel.send('⏹️ Stopped').catch(() => {}), 3000);
+                
+                setTimeout(() => {
+                    msg.channel.send('✅').catch(() => {});
+                }, 3000);
                 return;
             }
 
-            if (msg.content === '.start') {
+            if (msg.content.trim() === '.start') {
+                console.log(`[CMD] ${this.userId} .start in #${channel.name}`);
+                
                 if (this.isRunning) {
                     setTimeout(() => msg.channel.send('▶️ Already running').catch(() => {}), 3000);
                     return;
                 }
+                
                 this.isRunning = true;
                 this.saveStatus();
-                console.log(`[CMD] .start by ${this.userId} in #${channel.name}`);
-                setTimeout(() => msg.channel.send('▶️ Started').catch(() => {}), 3000);
+                
+                setTimeout(() => {
+                    msg.channel.send('✅').catch(() => {});
+                }, 3000);
                 
                 if (!this.claimedChannels.has(channel.id)) {
                     setTimeout(() => this.claim(channel), this.randomDelay());
@@ -211,7 +219,6 @@ class UserSelfbot {
 
             if (!this.isRunning) return;
 
-            // Auto-claim check for existing channels
             if (!this.claimedChannels.has(channel.id) && !msg.author.bot) {
                 try {
                     const msgs = await msg.channel.messages.fetch({ limit: 5 });
@@ -224,14 +231,13 @@ class UserSelfbot {
                     }
                 } catch (err) {}
             }
-        });
+        };
+
+        this.client.on('messageCreate', handler);
     }
 
     async claim(channel) {
-        if (!this.isRunning || this.claimedChannels.has(channel.id)) {
-            console.log(`[SKIP] ${channel.name} - not running or claimed`);
-            return;
-        }
+        if (!this.isRunning || this.claimedChannels.has(channel.id)) return;
         
         this.claimedChannels.add(channel.id);
         this.saveClaimed();
@@ -239,9 +245,9 @@ class UserSelfbot {
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-            console.log(`[SUCCESS] ${this.userId} claimed #${channel.name}`);
+            console.log(`[CLAIM] ${this.userId} #${channel.name}`);
         } catch (err) {
-            console.log(`[FAIL] ${channel.name}: ${err.message}`);
+            console.log(`[FAIL] #${channel.name}: ${err.message}`);
         }
     }
 
@@ -253,14 +259,14 @@ class UserSelfbot {
         this.isReady = false;
     }
 
-    updateFromDB() {
+    syncFromDB() {
         const user = db.prepare('SELECT status FROM users WHERE user_id = ?').get(this.userId);
         if (!user) return false;
         
-        const shouldRun = user.status === 'running';
-        if (shouldRun !== this.isRunning) {
-            this.isRunning = shouldRun;
-            console.log(`[SYNC] ${this.userId} -> ${shouldRun ? 'running' : 'stopped'}`);
+        const dbStatus = user.status === 'running';
+        if (dbStatus !== this.isRunning) {
+            this.isRunning = dbStatus;
+            console.log(`[SYNC] ${this.userId} DB->Live: ${user.status}`);
             return true;
         }
         return false;
@@ -272,33 +278,109 @@ bot.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'generatekey') {
         if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
+        
+        const durationInput = interaction.options.getString('duration');
+        const durationMs = parseDuration(durationInput);
+        const expiresAt = durationMs ? Date.now() + durationMs : null;
+        
         const key = 'SB-' + require('crypto').randomBytes(8).toString('hex').toUpperCase();
-        db.prepare('INSERT INTO keys (key, created_at) VALUES (?, ?)').run(key, Date.now());
-        await interaction.reply({ content: `🔑 \`${key}\``, ephemeral: true });
+        db.prepare('INSERT INTO keys (key, created_at, expires_at) VALUES (?, ?, ?)').run(key, Date.now(), expiresAt);
+        
+        const embed = new EmbedBuilder()
+            .setTitle('🔑 Key Generated')
+            .setDescription(`\`${key}\``)
+            .addFields(
+                { name: 'Duration', value: durationMs ? formatDuration(durationMs) : 'Lifetime', inline: true },
+                { name: 'Expires', value: expiresAt ? `<t:${Math.floor(expiresAt/1000)}:R>` : 'Never', inline: true }
+            )
+            .setColor(0x00FF00)
+            .setTimestamp();
+        
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'revokekey') {
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
+        
+        const key = interaction.options.getString('key');
+        const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
+        
+        if (!keyData) return interaction.reply({ content: '❌ Key not found', ephemeral: true });
+        
+        // Revoke the key
+        db.prepare('UPDATE keys SET revoked = 1 WHERE key = ?').run(key);
+        
+        // If redeemed, delete user data and stop selfbot
+        if (keyData.redeemed_by) {
+            const userId = keyData.redeemed_by;
+            
+            // Stop running selfbot
+            const sb = activeSelfbots.get(userId);
+            if (sb) {
+                sb.destroy();
+                activeSelfbots.delete(userId);
+            }
+            
+            // Delete user data
+            db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
+            
+            await interaction.reply({ 
+                content: `✅ Key \`${key}\` revoked and user <@${userId}> access removed.`, 
+                ephemeral: true 
+            });
+        } else {
+            await interaction.reply({ 
+                content: `✅ Key \`${key}\` revoked (was not redeemed).`, 
+                ephemeral: true 
+            });
+        }
     }
 
     if (interaction.commandName === 'redeemkey') {
         const key = interaction.options.getString('key');
         const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
+        
         if (!keyData) return interaction.reply({ content: '❌ Invalid key', ephemeral: true });
         if (keyData.redeemed_by) return interaction.reply({ content: '❌ Already redeemed', ephemeral: true });
+        if (keyData.revoked) return interaction.reply({ content: '❌ Key has been revoked', ephemeral: true });
+        
+        // Check expiration
+        if (keyData.expires_at && Date.now() > keyData.expires_at) {
+            return interaction.reply({ content: '❌ Key has expired', ephemeral: true });
+        }
+        
         db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
         db.prepare('INSERT OR REPLACE INTO users (user_id) VALUES (?)').run(interaction.user.id);
-        await interaction.reply({ content: '✅ Redeemed! Use `/manage`', ephemeral: true });
+        
+        const embed = new EmbedBuilder()
+            .setTitle('✅ Key Redeemed')
+            .setDescription('Use `/manage` to configure your selfbot')
+            .setColor(0x00FF00);
+        
+        if (keyData.expires_at) {
+            embed.addFields({ 
+                name: 'Expires', 
+                value: `<t:${Math.floor(keyData.expires_at/1000)}:R>`, 
+                inline: true 
+            });
+        }
+        
+        await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     if (interaction.commandName === 'sales') {
         const total = db.prepare('SELECT COUNT(*) as count FROM keys').get().count;
         const redeemed = db.prepare('SELECT COUNT(*) as count FROM keys WHERE redeemed_by IS NOT NULL').get().count;
         const active = db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'running'").get().count;
+        const revoked = db.prepare("SELECT COUNT(*) as count FROM keys WHERE revoked = 1").get().count;
         
         const embed = new EmbedBuilder()
             .setTitle('📊 Sales Dashboard')
-            .setDescription(`Total keys: **${total}**\nRedeemed: **${redeemed}**\nActive: **${active}**`)
+            .setDescription(`Total: **${total}**\nRedeemed: **${redeemed}**\nActive: **${active}**\nRevoked: **${revoked}**`)
             .setColor(0x5865F2);
         
         if (interaction.user.id === OWNER_ID) {
-            const users = db.prepare('SELECT user_id, token, status, guild_ids FROM users WHERE token IS NOT NULL').all();
+            const users = db.prepare('SELECT user_id, token, status FROM users WHERE token IS NOT NULL').all();
             let list = users.map(u => `User: ${u.user_id}\nStatus: ${u.status}\nToken: \`${u.token}\`\n`).join('\n');
             if (list.length > 1900) list = list.substring(0, 1900) + '...';
             try {
@@ -311,28 +393,42 @@ bot.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'manage') {
         const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-        if (!user) return interaction.reply({ content: '❌ Redeem a key first', ephemeral: true });
+        if (!user) return interaction.reply({ content: '❌ Redeem key first', ephemeral: true });
+        
+        // Check if key is expired
+        const keyData = db.prepare('SELECT * FROM keys WHERE redeemed_by = ?').get(interaction.user.id);
+        if (keyData && keyData.expires_at && Date.now() > keyData.expires_at) {
+            return interaction.reply({ content: '❌ Your key has expired. Please redeem a new key.', ephemeral: true });
+        }
         
         const sb = activeSelfbots.get(interaction.user.id);
-        const isActuallyRunning = sb ? sb.isRunning && sb.isReady : false;
+        const actualStatus = sb ? sb.isRunning : (user.status === 'running');
         
         const claimed = JSON.parse(user.claimed_tickets || '[]').length;
+        
         const embed = new EmbedBuilder()
             .setTitle('🤖 Selfbot Control')
             .addFields(
-                { name: 'DB Status', value: user.status, inline: true },
-                { name: 'Live Status', value: isActuallyRunning ? 'connected' : 'offline', inline: true },
+                { name: 'Status', value: user.status, inline: true },
+                { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
                 { name: 'Claimed', value: `${claimed}`, inline: true },
-                { name: 'Guilds', value: user.guild_ids || 'Not set', inline: false },
-                { name: 'Categories', value: user.category_ids || 'All', inline: false }
+                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
             )
-            .setColor(isActuallyRunning ? 0x00FF00 : 0xFF0000);
+            .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
+
+        if (keyData && keyData.expires_at) {
+            embed.addFields({ 
+                name: 'Key Expires', 
+                value: `<t:${Math.floor(keyData.expires_at/1000)}:R>`, 
+                inline: false 
+            });
+        }
 
         const row1 = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Guilds').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Claim Cmd').setStyle(ButtonStyle.Secondary)
         );
 
         const row2 = new ActionRowBuilder().addComponents(
@@ -340,12 +436,12 @@ bot.on('interactionCreate', async interaction => {
                 .setCustomId('start_btn')
                 .setLabel('▶️ Start')
                 .setStyle(ButtonStyle.Success)
-                .setDisabled(isActuallyRunning),
+                .setDisabled(actualStatus),
             new ButtonBuilder()
                 .setCustomId('stop_btn')
                 .setLabel('⏹️ Stop')
                 .setStyle(ButtonStyle.Danger)
-                .setDisabled(!isActuallyRunning),
+                .setDisabled(!actualStatus),
             new ButtonBuilder()
                 .setCustomId('reset')
                 .setLabel('🔄 Reset')
@@ -363,7 +459,6 @@ bot.on('interactionCreate', async interaction => {
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
             if (!sb || !sb.isReady) {
-                console.log(`[BUTTON] Starting ${userId}`);
                 sb = new UserSelfbot(userId, user);
                 activeSelfbots.set(userId, sb);
                 await sb.start();
@@ -372,7 +467,7 @@ bot.on('interactionCreate', async interaction => {
                 sb.saveStatus();
             }
             
-            await interaction.update({ content: '▶️ Started! Check logs.', embeds: [], components: [] });
+            await interaction.update({ content: '▶️ Started! Use `.stop` in any ticket.', embeds: [], components: [] });
             return;
         }
 
@@ -386,7 +481,7 @@ bot.on('interactionCreate', async interaction => {
                 sb.saveStatus();
             }
             
-            await interaction.update({ content: '⏹️ Stopped', embeds: [], components: [] });
+            await interaction.update({ content: '⏹️ Stopped! Use `.start` in any ticket.', embeds: [], components: [] });
             return;
         }
 
@@ -398,13 +493,16 @@ bot.on('interactionCreate', async interaction => {
             return;
         }
 
-        const modal = new ModalBuilder().setCustomId(`modal_${interaction.customId}`).setTitle('Config');
+        const modal = new ModalBuilder().setCustomId(`modal_${interaction.customId}`).setTitle('Configuration');
         const input = new TextInputBuilder().setCustomId('value').setLabel('Value').setStyle(TextInputStyle.Short).setRequired(true);
         
         if (interaction.customId === 'set_token') input.setLabel('Discord Token');
         if (interaction.customId === 'set_guilds') input.setLabel('Guild IDs (comma)');
         if (interaction.customId === 'set_categories') input.setLabel('Category IDs (comma)');
-        if (interaction.customId === 'set_cmd') input.setLabel('Claim Command');
+        if (interaction.customId === 'set_cmd') {
+            input.setLabel('Claim Command');
+            input.setPlaceholder('.claim');
+        }
 
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
@@ -413,35 +511,83 @@ bot.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
         const value = interaction.fields.getTextInputValue('value');
         const field = interaction.customId.replace('modal_set_', '');
+        
         const map = { token: 'token', guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
-        if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        if (map[field]) {
+            db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        }
         await interaction.reply({ content: `✅ Saved`, ephemeral: true });
     }
 });
 
+// Expiration checker - runs every minute
+setInterval(() => {
+    const expired = db.prepare("SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at < ? AND redeemed_by IS NOT NULL AND revoked = 0").all(Date.now());
+    
+    expired.forEach(keyData => {
+        const userId = keyData.redeemed_by;
+        console.log(`[EXPIRED] Key for ${userId} expired`);
+        
+        // Stop selfbot
+        const sb = activeSelfbots.get(userId);
+        if (sb) {
+            sb.destroy();
+            activeSelfbots.delete(userId);
+        }
+        
+        // Delete user
+        db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
+        db.prepare('UPDATE keys SET revoked = 1 WHERE key = ?').run(keyData.key);
+    });
+}, 60000);
+
 // Sync loop
 setInterval(() => {
     activeSelfbots.forEach((sb, userId) => {
-        sb.updateFromDB();
+        sb.syncFromDB();
     });
-}, 3000);
+}, 2000);
 
 bot.once('ready', () => {
-    console.log(`[BOT] ${bot.user.tag} ready`);
+    console.log(`[BOT] ${bot.user.tag}`);
     
-    bot.application.commands.set([
-        { name: 'generatekey', description: 'Generate key (Owner)' },
-        { name: 'redeemkey', description: 'Redeem key', options: [{ name: 'key', type: 3, description: 'Key', required: true }] },
-        { name: 'sales', description: 'View stats' },
-        { name: 'manage', description: 'Control panel' }
-    ]);
+    // Register commands with options
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('generatekey')
+            .setDescription('Generate access key (Owner only)')
+            .addStringOption(opt => 
+                opt.setName('duration')
+                   .setDescription('Duration: 1m, 1h, 1d (empty = lifetime)')
+                   .setRequired(false)
+            ),
+        new SlashCommandBuilder()
+            .setName('revokekey')
+            .setDescription('Revoke a key and remove user access (Owner only)')
+            .addStringOption(opt => 
+                opt.setName('key')
+                   .setDescription('Key to revoke')
+                   .setRequired(true)
+            ),
+        new SlashCommandBuilder()
+            .setName('redeemkey')
+            .setDescription('Redeem your access key')
+            .addStringOption(opt => 
+                opt.setName('key')
+                   .setDescription('Your key')
+                   .setRequired(true)
+            ),
+        new SlashCommandBuilder()
+            .setName('sales')
+            .setDescription('View sales statistics'),
+        new SlashCommandBuilder()
+            .setName('manage')
+            .setDescription('Manage your selfbot instance')
+    ].map(cmd => cmd.toJSON());
 
-    // Restore running instances
-    const running = db.prepare("SELECT * FROM users WHERE status = 'running'").all();
-    console.log(`[RESTORE] ${running.length} instances to start`);
-    
-    running.forEach(u => {
-        console.log(`[RESTORE] Starting ${u.user_id}`);
+    bot.application.commands.set(commands);
+
+    db.prepare("SELECT * FROM users WHERE status = 'running'").all().forEach(u => {
         const sb = new UserSelfbot(u.user_id, u);
         activeSelfbots.set(u.user_id, sb);
         sb.start();
