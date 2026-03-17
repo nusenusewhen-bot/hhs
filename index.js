@@ -38,7 +38,7 @@ class UserSelfbot {
     }
 
     randomDelay() {
-        return 350;
+        return 280;
     }
 
     saveClaimed() {
