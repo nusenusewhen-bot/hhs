@@ -84,7 +84,7 @@ class UserSelfbot {
                     }
                     this.isRunning = false;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Stopped').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('Stopped Auto Claim').catch(() => {}), 500);
                     return;
                 }
 
@@ -95,7 +95,7 @@ class UserSelfbot {
                     }
                     this.isRunning = true;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('✅ Started').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('Started Auto Claim').catch(() => {}), 500);
                     
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
