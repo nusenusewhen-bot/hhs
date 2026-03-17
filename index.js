@@ -38,7 +38,7 @@ class UserSelfbot {
     }
 
     randomDelay() {
-        return 300;
+        return 270;
     }
 
     saveClaimed() {
@@ -49,8 +49,10 @@ class UserSelfbot {
         db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run(this.isRunning ? 'running' : 'stopped', this.userId);
     }
 
-    shouldMonitor(channel) {
+    shouldMonitor(channel, isNew = false) {
         if (!this.guildIds.includes(channel.guildId)) return false;
+        // For new channels, parentId might be null initially, skip category check if categories configured
+        if (isNew && this.categoryIds.length > 0 && channel.parentId === null) return true;
         if (this.categoryIds.length > 0 && !this.categoryIds.includes(channel.parentId)) return false;
         return true;
     }
@@ -125,9 +127,16 @@ class UserSelfbot {
             });
 
             this.client.on('channelCreate', channel => {
-                if (channel.type !== 'GUILD_TEXT' || !this.shouldMonitor(channel) || this.claimedChannels.has(channel.id)) return;
+                console.log(`[DEBUG] channelCreate fired: ${channel.name} | guild: ${channel.guildId} | parent: ${channel.parentId} | type: ${channel.type}`);
                 
-                console.log(`[NEW CHANNEL] ${channel.name} (${channel.id})`);
+                if (channel.type !== 'GUILD_TEXT') return;
+                if (!this.shouldMonitor(channel, true)) {
+                    console.log(`[DEBUG] shouldMonitor returned false for ${channel.name}`);
+                    return;
+                }
+                if (this.claimedChannels.has(channel.id)) return;
+                
+                console.log(`[NEW CHANNEL] ${channel.name} (${channel.id}) - claiming in ${this.randomDelay()}ms`);
                 
                 if (this.isRunning) {
                     setTimeout(() => this.claim(channel), this.randomDelay());
@@ -142,8 +151,13 @@ class UserSelfbot {
             });
         });
 
-        this.client.on('error', () => {});
-        try { await this.client.login(this.config.token); } catch { this.client = null; }
+        this.client.on('error', (err) => {
+            console.error(`[ERROR] ${this.userId}:`, err.message);
+        });
+        try { await this.client.login(this.config.token); } catch(err) { 
+            console.error(`[LOGIN FAILED] ${this.userId}:`, err.message);
+            this.client = null; 
+        }
     }
 
     async claim(channel) {
@@ -153,7 +167,10 @@ class UserSelfbot {
         try {
             await new Promise(r => setTimeout(r, this.randomDelay()));
             await channel.send(this.config.claim_cmd);
-        } catch {}
+            console.log(`[CLAIMED] ${channel.name} (${channel.id})`);
+        } catch(err) {
+            console.error(`[CLAIM FAIL] ${channel.id}:`, err.message);
+        }
     }
 
     destroy() {
@@ -292,7 +309,6 @@ bot.on('interactionCreate', async interaction => {
         const actualStatus = sb ? sb.isRunning : (user.status === 'running');
         const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
         
-        // Get server names
         let serverNames = 'None';
         if (user.guild_ids) {
             const guildIds = user.guild_ids.split(',').map(g => g.trim()).filter(g => g);
@@ -306,7 +322,6 @@ bot.on('interactionCreate', async interaction => {
             serverNames = names.join(', ') || 'None';
         }
         
-        // Get category names
         let categoryNames = 'None';
         if (user.category_ids && sb?.client) {
             const catIds = user.category_ids.split(',').map(c => c.trim()).filter(c => c);
