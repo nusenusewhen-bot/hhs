@@ -17,7 +17,7 @@ const activeSelfbots = new Map();
 
 function parseDuration(input) {
     if (!input) return null;
-    const match = input.match(/^(\d+)([hmd])$/i);
+    const match = input.match(/^(\d+)([mhd])$/i);
     if (!match) return null;
     const num = parseInt(match[1]);
     const unit = match[2].toLowerCase();
@@ -197,7 +197,7 @@ bot.on('interactionCreate', async interaction => {
             .setTitle('🔑 Key Generated')
             .setDescription(`\`${key}\``)
             .addFields(
-                { name: 'Duration', value: durationMs ? `${Math.floor(durationMs/3600000)}h` : 'Lifetime', inline: true },
+                { name: 'Duration', value: durationMs ? `${Math.floor(durationMs/60000)}m` : 'Lifetime', inline: true },
                 { name: 'Expires', value: expiresAt ? `<t:${Math.floor(expiresAt/1000)}:R>` : 'Never', inline: true }
             )
             .setColor(0x00FF00);
@@ -223,6 +223,23 @@ bot.on('interactionCreate', async interaction => {
         } else {
             await interaction.reply({ content: `✅ Key revoked (not redeemed)`, ephemeral: true });
         }
+    }
+
+    if (interaction.commandName === 'revokeuser') {
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
+        
+        const targetUserId = interaction.options.getString('userid');
+        const userKeys = db.prepare('SELECT * FROM keys WHERE redeemed_by = ? AND revoked = 0').all(targetUserId);
+        
+        if (userKeys.length === 0) return interaction.reply({ content: '❌ User has no active keys', ephemeral: true });
+        
+        const sb = activeSelfbots.get(targetUserId);
+        if (sb) { sb.destroy(); activeSelfbots.delete(targetUserId); }
+        
+        db.prepare('DELETE FROM users WHERE user_id = ?').run(targetUserId);
+        db.prepare('UPDATE keys SET revoked = 1 WHERE redeemed_by = ?').run(targetUserId);
+        
+        await interaction.reply({ content: `✅ Revoked ${userKeys.length} key(s) and removed <@${targetUserId}>`, ephemeral: true });
     }
 
     if (interaction.commandName === 'redeemkey') {
@@ -267,12 +284,41 @@ bot.on('interactionCreate', async interaction => {
         const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
         if (!user) return interaction.reply({ content: '❌ Redeem key first', ephemeral: true });
         
-        const keyData = db.prepare('SELECT * FROM keys WHERE redeemed_by = ?').get(interaction.user.id);
-        if (keyData?.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', ephemeral: true });
+        const keyData = db.prepare('SELECT * FROM keys WHERE redeemed_by = ? AND revoked = 0 ORDER BY redeemed_at DESC').get(interaction.user.id);
+        if (!keyData) return interaction.reply({ content: '❌ No active key found', ephemeral: true });
+        if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', ephemeral: true });
         
         const sb = activeSelfbots.get(interaction.user.id);
         const actualStatus = sb ? sb.isRunning : (user.status === 'running');
         const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
+        
+        // Get server names
+        let serverNames = 'None';
+        if (user.guild_ids) {
+            const guildIds = user.guild_ids.split(',').map(g => g.trim()).filter(g => g);
+            const names = [];
+            for (const gid of guildIds) {
+                try {
+                    const guild = await bot.guilds.fetch(gid);
+                    names.push(guild.name);
+                } catch { names.push(`Unknown (${gid})`); }
+            }
+            serverNames = names.join(', ') || 'None';
+        }
+        
+        // Get category names
+        let categoryNames = 'None';
+        if (user.category_ids && sb?.client) {
+            const catIds = user.category_ids.split(',').map(c => c.trim()).filter(c => c);
+            const names = [];
+            for (const cid of catIds) {
+                try {
+                    const channel = await sb.client.channels.fetch(cid);
+                    names.push(channel.name);
+                } catch { names.push(`Unknown (${cid})`); }
+            }
+            categoryNames = names.join(', ') || 'None';
+        }
         
         const embed = new EmbedBuilder()
             .setTitle('🤖 Selfbot Control')
@@ -280,7 +326,11 @@ bot.on('interactionCreate', async interaction => {
                 { name: 'Status', value: user.status, inline: true },
                 { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
                 { name: 'Claimed', value: `${claimed}`, inline: true },
-                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
+                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true },
+                { name: 'Server ID(s)', value: user.guild_ids || 'None', inline: false },
+                { name: 'Server Name(s)', value: serverNames.substring(0, 1000), inline: false },
+                { name: 'Category ID(s)', value: user.category_ids || 'None', inline: false },
+                { name: 'Category Name(s)', value: categoryNames.substring(0, 1000), inline: false }
             )
             .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
 
@@ -288,7 +338,7 @@ bot.on('interactionCreate', async interaction => {
 
         const row1 = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Guilds').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Servers').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
         );
@@ -417,7 +467,7 @@ bot.on('interactionCreate', async interaction => {
             
             db.prepare('UPDATE users SET token = NULL, guild_ids = NULL, category_ids = NULL, claimed_tickets = "[]", status = "stopped" WHERE user_id = ?').run(userId);
             
-            await interaction.reply({ content: '✅ Reset complete! Set new Token, Guilds, and Categories to start again.', ephemeral: true });
+            await interaction.reply({ content: '✅ Reset complete! Set new Token, Servers, and Categories to start again.', ephemeral: true });
             return;
         }
 
@@ -425,7 +475,7 @@ bot.on('interactionCreate', async interaction => {
         const input = new TextInputBuilder().setCustomId('value').setLabel('Value').setStyle(TextInputStyle.Short).setRequired(true);
         
         if (interaction.customId === 'set_token') input.setLabel('Discord Token');
-        if (interaction.customId === 'set_guilds') input.setLabel('Guild IDs (comma)');
+        if (interaction.customId === 'set_guilds') input.setLabel('Server IDs (comma)');
         if (interaction.customId === 'set_categories') input.setLabel('Category IDs (comma)');
         if (interaction.customId === 'set_cmd') { input.setLabel('Claim Command'); input.setPlaceholder('.claim'); }
 
@@ -473,8 +523,9 @@ bot.once('ready', () => {
     console.log(`[BOT] ${bot.user.tag}`);
     
     bot.application.commands.set([
-        new SlashCommandBuilder().setName('generatekey').setDescription('Generate key (Owner)').addStringOption(opt => opt.setName('duration').setDescription('1m, 1h, 1d (empty=lifetime)').setRequired(false)),
+        new SlashCommandBuilder().setName('generatekey').setDescription('Generate key (Owner)').addStringOption(opt => opt.setName('duration').setDescription('30m, 1h, 1d (empty=lifetime)').setRequired(false)),
         new SlashCommandBuilder().setName('revokekey').setDescription('Revoke key (Owner)').addStringOption(opt => opt.setName('key').setDescription('Key to revoke').setRequired(true)),
+        new SlashCommandBuilder().setName('revokeuser').setDescription('Revoke all user keys (Owner)').addStringOption(opt => opt.setName('userid').setDescription('User ID to revoke').setRequired(true)),
         new SlashCommandBuilder().setName('redeemkey').setDescription('Redeem key').addStringOption(opt => opt.setName('key').setDescription('Your key').setRequired(true)),
         new SlashCommandBuilder().setName('sales').setDescription('View stats'),
         new SlashCommandBuilder().setName('manage').setDescription('Control panel')
