@@ -1,4 +1,4 @@
-const { Client: BotClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder, MessageFlags } = require('discord.js');
+const { Client: BotClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder } = require('discord.js');
 const { Client: SelfbotClient } = require('discord.js-selfbot-v13');
 const Database = require('better-sqlite3');
 
@@ -202,7 +202,7 @@ bot.on('interactionCreate', async interaction => {
     if (!interaction.isCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
 
     if (interaction.commandName === 'generatekey') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', flags: MessageFlags.Ephemeral });
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
         
         const durationInput = interaction.options.getString('duration');
         const durationMs = parseDuration(durationInput);
@@ -220,15 +220,15 @@ bot.on('interactionCreate', async interaction => {
             )
             .setColor(0x00FF00);
         
-        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     if (interaction.commandName === 'revokekey') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', flags: MessageFlags.Ephemeral });
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
         
         const key = interaction.options.getString('key');
         const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
-        if (!keyData) return interaction.reply({ content: '❌ Key not found', flags: MessageFlags.Ephemeral });
+        if (!keyData) return interaction.reply({ content: '❌ Key not found', ephemeral: true });
         
         db.prepare('UPDATE keys SET revoked = 1 WHERE key = ?').run(key);
         
@@ -237,19 +237,19 @@ bot.on('interactionCreate', async interaction => {
             const sb = activeSelfbots.get(userId);
             if (sb) { sb.destroy(); activeSelfbots.delete(userId); }
             db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
-            await interaction.reply({ content: `✅ Key revoked and <@${userId}> removed`, flags: MessageFlags.Ephemeral });
+            await interaction.reply({ content: `✅ Key revoked and <@${userId}> removed`, ephemeral: true });
         } else {
-            await interaction.reply({ content: `✅ Key revoked (not redeemed)`, flags: MessageFlags.Ephemeral });
+            await interaction.reply({ content: `✅ Key revoked (not redeemed)`, ephemeral: true });
         }
     }
 
     if (interaction.commandName === 'revokeuser') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', flags: MessageFlags.Ephemeral });
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only', ephemeral: true });
         
         const targetUserId = interaction.options.getString('userid');
         const userKeys = db.prepare('SELECT * FROM keys WHERE redeemed_by = ? AND revoked = 0').all(targetUserId);
         
-        if (userKeys.length === 0) return interaction.reply({ content: '❌ User has no active keys', flags: MessageFlags.Ephemeral });
+        if (userKeys.length === 0) return interaction.reply({ content: '❌ User has no active keys', ephemeral: true });
         
         const sb = activeSelfbots.get(targetUserId);
         if (sb) { sb.destroy(); activeSelfbots.delete(targetUserId); }
@@ -257,22 +257,22 @@ bot.on('interactionCreate', async interaction => {
         db.prepare('DELETE FROM users WHERE user_id = ?').run(targetUserId);
         db.prepare('UPDATE keys SET revoked = 1 WHERE redeemed_by = ?').run(targetUserId);
         
-        await interaction.reply({ content: `✅ Revoked ${userKeys.length} key(s) and removed <@${targetUserId}>`, flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `✅ Revoked ${userKeys.length} key(s) and removed <@${targetUserId}>`, ephemeral: true });
     }
 
     if (interaction.commandName === 'redeemkey') {
         const key = interaction.options.getString('key');
         const keyData = db.prepare('SELECT * FROM keys WHERE key = ?').get(key);
         
-        if (!keyData) return interaction.reply({ content: '❌ Invalid key', flags: MessageFlags.Ephemeral });
-        if (keyData.redeemed_by) return interaction.reply({ content: '❌ Already redeemed', flags: MessageFlags.Ephemeral });
-        if (keyData.revoked) return interaction.reply({ content: '❌ Key revoked', flags: MessageFlags.Ephemeral });
-        if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', flags: MessageFlags.Ephemeral });
+        if (!keyData) return interaction.reply({ content: '❌ Invalid key', ephemeral: true });
+        if (keyData.redeemed_by) return interaction.reply({ content: '❌ Already redeemed', ephemeral: true });
+        if (keyData.revoked) return interaction.reply({ content: '❌ Key revoked', ephemeral: true });
+        if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', ephemeral: true });
         
         db.prepare('UPDATE keys SET redeemed_by = ?, redeemed_at = ? WHERE key = ?').run(interaction.user.id, Date.now(), key);
         db.prepare('INSERT OR REPLACE INTO users (user_id) VALUES (?)').run(interaction.user.id);
         
-        await interaction.reply({ content: '✅ Redeemed! Use `/manage`', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: '✅ Redeemed! Use `/manage`', ephemeral: true });
     }
 
     if (interaction.commandName === 'sales') {
@@ -295,16 +295,16 @@ bot.on('interactionCreate', async interaction => {
                 await owner.send({ content: `**Tokens:**\n${list || 'None'}` });
             } catch {}
         }
-        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     if (interaction.commandName === 'manage') {
         const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(interaction.user.id);
-        if (!user) return interaction.reply({ content: '❌ Redeem key first', flags: MessageFlags.Ephemeral });
+        if (!user) return interaction.reply({ content: '❌ Redeem key first', ephemeral: true });
         
         const keyData = db.prepare('SELECT * FROM keys WHERE redeemed_by = ? AND revoked = 0 ORDER BY redeemed_at DESC').get(interaction.user.id);
-        if (!keyData) return interaction.reply({ content: '❌ No active key found', flags: MessageFlags.Ephemeral });
-        if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', flags: MessageFlags.Ephemeral });
+        if (!keyData) return interaction.reply({ content: '❌ No active key found', ephemeral: true });
+        if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', ephemeral: true });
         
         const sb = activeSelfbots.get(interaction.user.id);
         const actualStatus = sb ? sb.isRunning : (user.status === 'running');
@@ -365,7 +365,7 @@ bot.on('interactionCreate', async interaction => {
             new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
         );
 
-        await interaction.reply({ embeds: [embed], components: [row1, row2], flags: MessageFlags.Ephemeral });
+        await interaction.reply({ embeds: [embed], components: [row1, row2], ephemeral: true });
     }
 
     if (interaction.isButton()) {
@@ -485,7 +485,7 @@ bot.on('interactionCreate', async interaction => {
             
             db.prepare('UPDATE users SET token = NULL, guild_ids = NULL, category_ids = NULL, claimed_tickets = "[]", status = "stopped" WHERE user_id = ?').run(userId);
             
-            await interaction.reply({ content: '✅ Reset complete! Set new Token, Servers, and Categories to start again.', flags: MessageFlags.Ephemeral });
+            await interaction.reply({ content: '✅ Reset complete! Set new Token, Servers, and Categories to start again.', ephemeral: true });
             return;
         }
 
@@ -506,7 +506,7 @@ bot.on('interactionCreate', async interaction => {
         const field = interaction.customId.replace('modal_set_', '');
         
         if (field === 'token') {
-            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            await interaction.deferReply({ ephemeral: true });
             const validation = await validateToken(value);
             
             if (validation.valid) {
@@ -520,7 +520,7 @@ bot.on('interactionCreate', async interaction => {
         
         const map = { guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
         if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
-        await interaction.reply({ content: '✅ Saved', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: '✅ Saved', ephemeral: true });
     }
 });
 
