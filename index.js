@@ -196,6 +196,74 @@ async function validateToken(token) {
     } catch (err) { return { valid: false, error: err.message }; }
 }
 
+async function buildManageEmbed(userId, message) {
+    const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+    if (!user) return null;
+    
+    const sb = activeSelfbots.get(userId);
+    const actualStatus = sb ? sb.isRunning : (user.status === 'running');
+    const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
+    
+    let serverNames = 'None';
+    if (user.guild_ids) {
+        const guildIds = user.guild_ids.split(',').map(g => g.trim()).filter(g => g);
+        const names = [];
+        for (const gid of guildIds) {
+            try {
+                const guild = await bot.guilds.fetch(gid);
+                names.push(guild.name);
+            } catch { names.push(`Unknown (${gid})`); }
+        }
+        serverNames = names.join(', ') || 'None';
+    }
+    
+    let categoryNames = 'None';
+    if (user.category_ids && sb?.client) {
+        const catIds = user.category_ids.split(',').map(c => c.trim()).filter(c => c);
+        const names = [];
+        for (const cid of catIds) {
+            try {
+                const channel = await sb.client.channels.fetch(cid);
+                names.push(channel.name);
+            } catch { names.push(`Unknown (${cid})`); }
+        }
+        categoryNames = names.join(', ') || 'None';
+    }
+    
+    const keyData = db.prepare('SELECT * FROM keys WHERE redeemed_by = ? AND revoked = 0 ORDER BY redeemed_at DESC').get(userId);
+    
+    const embed = new EmbedBuilder()
+        .setTitle('🤖 Selfbot Control')
+        .addFields(
+            { name: 'Status', value: user.status, inline: true },
+            { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
+            { name: 'Claimed', value: `${claimed}`, inline: true },
+            { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true },
+            { name: 'Server ID(s)', value: user.guild_ids || 'None', inline: false },
+            { name: 'Server Name(s)', value: serverNames.substring(0, 1000), inline: false },
+            { name: 'Category ID(s)', value: user.category_ids || 'None', inline: false },
+            { name: 'Category Name(s)', value: categoryNames.substring(0, 1000), inline: false }
+        )
+        .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
+
+    if (keyData?.expires_at) embed.addFields({ name: 'Expires', value: `<t:${Math.floor(keyData.expires_at/1000)}:R>`, inline: false });
+
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Servers').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
+    );
+
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
+        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
+        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+    );
+
+    return { embeds: [embed], components: [row1, row2] };
+}
+
 bot.on('interactionCreate', async interaction => {
     if (!interaction.isCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
 
@@ -304,66 +372,8 @@ bot.on('interactionCreate', async interaction => {
         if (!keyData) return interaction.reply({ content: '❌ No active key found', ephemeral: true });
         if (keyData.expires_at && Date.now() > keyData.expires_at) return interaction.reply({ content: '❌ Key expired', ephemeral: true });
         
-        const sb = activeSelfbots.get(interaction.user.id);
-        const actualStatus = sb ? sb.isRunning : (user.status === 'running');
-        const claimed = sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length;
-        
-        let serverNames = 'None';
-        if (user.guild_ids) {
-            const guildIds = user.guild_ids.split(',').map(g => g.trim()).filter(g => g);
-            const names = [];
-            for (const gid of guildIds) {
-                try {
-                    const guild = await bot.guilds.fetch(gid);
-                    names.push(guild.name);
-                } catch { names.push(`Unknown (${gid})`); }
-            }
-            serverNames = names.join(', ') || 'None';
-        }
-        
-        let categoryNames = 'None';
-        if (user.category_ids && sb?.client) {
-            const catIds = user.category_ids.split(',').map(c => c.trim()).filter(c => c);
-            const names = [];
-            for (const cid of catIds) {
-                try {
-                    const channel = await sb.client.channels.fetch(cid);
-                    names.push(channel.name);
-                } catch { names.push(`Unknown (${cid})`); }
-            }
-            categoryNames = names.join(', ') || 'None';
-        }
-        
-        const embed = new EmbedBuilder()
-            .setTitle('🤖 Selfbot Control')
-            .addFields(
-                { name: 'Status', value: user.status, inline: true },
-                { name: 'Live', value: actualStatus ? '✅' : '❌', inline: true },
-                { name: 'Claimed', value: `${claimed}`, inline: true },
-                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true },
-                { name: 'Server ID(s)', value: user.guild_ids || 'None', inline: false },
-                { name: 'Server Name(s)', value: serverNames.substring(0, 1000), inline: false },
-                { name: 'Category ID(s)', value: user.category_ids || 'None', inline: false },
-                { name: 'Category Name(s)', value: categoryNames.substring(0, 1000), inline: false }
-            )
-            .setColor(actualStatus ? 0x00FF00 : 0xFF0000);
-
-        if (keyData?.expires_at) embed.addFields({ name: 'Expires', value: `<t:${Math.floor(keyData.expires_at/1000)}:R>`, inline: false });
-
-        const row1 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Servers').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
-        );
-
-        const row2 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
-            new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
-            new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-        );
-
-        await interaction.reply({ embeds: [embed], components: [row1, row2], ephemeral: true });
+        const data = await buildManageEmbed(interaction.user.id);
+        await interaction.reply({ ...data, ephemeral: true });
     }
 
     if (interaction.isButton()) {
@@ -392,22 +402,8 @@ bot.on('interactionCreate', async interaction => {
                             });
                         });
                         
-                        const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                            .spliceFields(0, 4, 
-                                { name: 'Status', value: 'running', inline: true },
-                                { name: 'Live', value: '✅', inline: true },
-                                { name: 'Claimed', value: `${sb.claimedChannels.size}`, inline: true },
-                                { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                            )
-                            .setColor(0x00FF00);
-
-                        const newRow2 = new ActionRowBuilder().addComponents(
-                            new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
-                            new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
-                            new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-                        );
-
-                        await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+                        const data = await buildManageEmbed(userId);
+                        await interaction.editReply(data);
                     }
                 }, 3000);
             } else {
@@ -422,22 +418,8 @@ bot.on('interactionCreate', async interaction => {
                     });
                 });
                 
-                const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                    .spliceFields(0, 4, 
-                        { name: 'Status', value: 'running', inline: true },
-                        { name: 'Live', value: '✅', inline: true },
-                        { name: 'Claimed', value: `${sb.claimedChannels.size}`, inline: true },
-                        { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                    )
-                    .setColor(0x00FF00);
-
-                const newRow2 = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(true),
-                    new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(false),
-                    new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-                );
-
-                await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+                const data = await buildManageEmbed(userId);
+                await interaction.editReply(data);
             }
             return;
         }
@@ -445,7 +427,6 @@ bot.on('interactionCreate', async interaction => {
         if (interaction.customId === 'stop_btn') {
             await interaction.deferUpdate();
             const sb = activeSelfbots.get(userId);
-            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
             if (sb) {
                 sb.isRunning = false;
@@ -453,22 +434,8 @@ bot.on('interactionCreate', async interaction => {
             }
             db.prepare('UPDATE users SET status = ? WHERE user_id = ?').run('stopped', userId);
             
-            const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-                .spliceFields(0, 4,
-                    { name: 'Status', value: 'stopped', inline: true },
-                    { name: 'Live', value: '❌', inline: true },
-                    { name: 'Claimed', value: `${sb ? sb.claimedChannels.size : JSON.parse(user.claimed_tickets || '[]').length}`, inline: true },
-                    { name: 'Claim Cmd', value: user.claim_cmd || '.claim', inline: true }
-                )
-                .setColor(0xFF0000);
-
-            const newRow2 = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(false),
-                new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(true),
-                new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
-            );
-
-            await interaction.editReply({ embeds: [newEmbed], components: [interaction.message.components[0], newRow2] });
+            const data = await buildManageEmbed(userId);
+            await interaction.editReply(data);
             return;
         }
 
@@ -516,7 +483,25 @@ bot.on('interactionCreate', async interaction => {
         
         const map = { guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
         if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
-        await interaction.reply({ content: '✅ Saved', ephemeral: true });
+        
+        // Update the selfbot instance if it exists
+        const sb = activeSelfbots.get(interaction.user.id);
+        if (sb) {
+            if (field === 'guilds') {
+                sb.guildIds = value.split(',').map(g => g.trim()).filter(g => g);
+            } else if (field === 'categories') {
+                sb.categoryIds = value.split(',').map(c => c.trim()).filter(c => c);
+            }
+        }
+        
+        // Edit the manage panel in place for guilds and categories
+        if (field === 'guilds' || field === 'categories') {
+            await interaction.deferUpdate();
+            const data = await buildManageEmbed(interaction.user.id);
+            await interaction.editReply(data);
+        } else {
+            await interaction.reply({ content: '✅ Saved', ephemeral: true });
+        }
     }
 });
 
