@@ -61,7 +61,7 @@ class UserSelfbot {
         
         this.client = new SelfbotClient({ checkUpdate: false, ws: { properties: { os: 'Windows', browser: 'Chrome', device: '', browser_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', os_version: '10', client_build_number: 9999 } } });
 
-        this.client.once('clientReady', () => {
+        this.client.once('ready', () => {
             this.isReady = true;
             console.log(`[READY] ${this.userId} as ${this.client.user.tag}`);
             
@@ -115,17 +115,15 @@ class UserSelfbot {
                 } catch {}
             });
 
-            if (this.client && this.client.guilds) {
-                this.client.guilds.cache.forEach(guild => {
-                    if (!this.guildIds.includes(guild.id)) return;
-                    guild.channels.cache.forEach(ch => {
-                        if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
-                        if (this.isRunning && !this.claimedChannels.has(ch.id)) {
-                            setTimeout(() => this.claim(ch), this.randomDelay());
-                        }
-                    });
+            this.client.guilds.cache.forEach(guild => {
+                if (!this.guildIds.includes(guild.id)) return;
+                guild.channels.cache.forEach(ch => {
+                    if (ch.type !== 'GUILD_TEXT' || !this.shouldMonitor(ch)) return;
+                    if (this.isRunning && !this.claimedChannels.has(ch.id)) {
+                        setTimeout(() => this.claim(ch), this.randomDelay());
+                    }
                 });
-            }
+            });
 
             this.client.on('channelCreate', channel => {
                 console.log(`[DEBUG] channelCreate fired: ${channel.name} | guild: ${channel.guildId} | parent: ${channel.parentId} | type: ${channel.type}`);
@@ -162,7 +160,7 @@ class UserSelfbot {
     }
 
     async claim(channel) {
-        if (!this.isRunning || this.claimedChannels.has(channel.id) || !this.client) return;
+        if (!this.isRunning || this.claimedChannels.has(channel.id)) return;
         this.claimedChannels.add(channel.id);
         this.saveClaimed();
         try {
@@ -382,7 +380,7 @@ bot.on('interactionCreate', async interaction => {
                 await sb.start();
                 
                 setTimeout(async () => {
-                    if (sb.isReady && sb.client) {
+                    if (sb.isReady) {
                         sb.isRunning = true;
                         sb.saveStatus();
                         
@@ -416,15 +414,13 @@ bot.on('interactionCreate', async interaction => {
                 sb.isRunning = true;
                 sb.saveStatus();
                 
-                if (sb.client) {
-                    sb.client.guilds.cache.forEach(guild => {
-                        if (!sb.guildIds.includes(guild.id)) return;
-                        guild.channels.cache.forEach(ch => {
-                            if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
-                            if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
-                        });
+                sb.client.guilds.cache.forEach(guild => {
+                    if (!sb.guildIds.includes(guild.id)) return;
+                    guild.channels.cache.forEach(ch => {
+                        if (ch.type !== 'GUILD_TEXT' || !sb.shouldMonitor(ch)) return;
+                        if (!sb.claimedChannels.has(ch.id)) setTimeout(() => sb.claim(ch), sb.randomDelay());
                     });
-                }
+                });
                 
                 const newEmbed = EmbedBuilder.from(interaction.message.embeds[0])
                     .spliceFields(0, 4, 
