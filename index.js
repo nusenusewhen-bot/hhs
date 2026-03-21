@@ -76,25 +76,25 @@ class UserSelfbot {
                     return;
                 }
 
-                if (msg.content === '.stop') {
+                if (msg.content === 'uh') {
                     if (!this.isRunning) {
-                        setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 500);
+                        setTimeout(() => msg.channel.send('..').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = false;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('Stopped Auto Claim').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('.').catch(() => {}), 500);
                     return;
                 }
 
-                if (msg.content === '.start') {
+                if (msg.content === 'um') {
                     if (this.isRunning) {
-                        setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 500);
+                        setTimeout(() => msg.channel.send('..').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = true;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('Started Auto Claim').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('.').catch(() => {}), 500);
                     
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
