@@ -76,25 +76,25 @@ class UserSelfbot {
                     return;
                 }
 
-                if (msg.content === 'qw') {
+                if (msg.content === '.stop') {
                     if (!this.isRunning) {
                         setTimeout(() => msg.channel.send('❌ Already stopped').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = false;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('Yep').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('Stopped Auto Claim').catch(() => {}), 500);
                     return;
                 }
 
-                if (msg.content === 'wq') {
+                if (msg.content === '.start') {
                     if (this.isRunning) {
                         setTimeout(() => msg.channel.send('❌ Already running').catch(() => {}), 500);
                         return;
                     }
                     this.isRunning = true;
                     this.saveStatus();
-                    setTimeout(() => msg.channel.send('Yep').catch(() => {}), 500);
+                    setTimeout(() => msg.channel.send('Started Auto Claim').catch(() => {}), 500);
                     
                     if (!this.claimedChannels.has(msg.channelId)) {
                         setTimeout(() => this.claim(msg.channel), this.randomDelay());
@@ -196,7 +196,7 @@ async function validateToken(token) {
     } catch (err) { return { valid: false, error: err.message }; }
 }
 
-async function buildManageEmbed(userId, message) {
+async function buildManageEmbed(userId) {
     const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
     if (!user) return null;
     
@@ -249,16 +249,16 @@ async function buildManageEmbed(userId, message) {
     if (keyData?.expires_at) embed.addFields({ name: 'Expires', value: `<t:${Math.floor(keyData.expires_at/1000)}:R>`, inline: false });
 
     const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('set_token').setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('set_guilds').setLabel('🏠 Servers').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('set_categories').setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('set_cmd').setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId(`set_token_${userId}`).setLabel('🔑 Token').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`set_guilds_${userId}`).setLabel('🏠 Servers').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`set_categories_${userId}`).setLabel('📁 Categories').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`set_cmd_${userId}`).setLabel('⌨️ Cmd').setStyle(ButtonStyle.Secondary)
     );
 
     const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('start_btn').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
-        new ButtonBuilder().setCustomId('stop_btn').setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
-        new ButtonBuilder().setCustomId('reset').setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId(`start_btn_${userId}`).setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(actualStatus),
+        new ButtonBuilder().setCustomId(`stop_btn_${userId}`).setLabel('⏹️ Stop').setStyle(ButtonStyle.Danger).setDisabled(!actualStatus),
+        new ButtonBuilder().setCustomId(`reset_${userId}`).setLabel('🔄 Reset').setStyle(ButtonStyle.Secondary)
     );
 
     return { embeds: [embed], components: [row1, row2] };
@@ -377,9 +377,13 @@ bot.on('interactionCreate', async interaction => {
     }
 
     if (interaction.isButton()) {
-        const userId = interaction.user.id;
+        const userId = interaction.customId.split('_').pop();
+        
+        if (interaction.user.id !== userId) {
+            return interaction.reply({ content: '❌ This is not your panel', ephemeral: true });
+        }
 
-        if (interaction.customId === 'start_btn') {
+        if (interaction.customId.startsWith('start_btn_')) {
             await interaction.deferUpdate();
             let sb = activeSelfbots.get(userId);
             const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
@@ -424,9 +428,10 @@ bot.on('interactionCreate', async interaction => {
             return;
         }
 
-        if (interaction.customId === 'stop_btn') {
+        if (interaction.customId.startsWith('stop_btn_')) {
             await interaction.deferUpdate();
             const sb = activeSelfbots.get(userId);
+            const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
             
             if (sb) {
                 sb.isRunning = false;
@@ -439,7 +444,7 @@ bot.on('interactionCreate', async interaction => {
             return;
         }
 
-        if (interaction.customId === 'reset') {
+        if (interaction.customId.startsWith('reset_')) {
             const sb = activeSelfbots.get(userId);
             if (sb) { 
                 sb.destroy(); 
@@ -455,10 +460,10 @@ bot.on('interactionCreate', async interaction => {
         const modal = new ModalBuilder().setCustomId(`modal_${interaction.customId}`).setTitle('Config');
         const input = new TextInputBuilder().setCustomId('value').setLabel('Value').setStyle(TextInputStyle.Short).setRequired(true);
         
-        if (interaction.customId === 'set_token') input.setLabel('Discord Token');
-        if (interaction.customId === 'set_guilds') input.setLabel('Server IDs (comma)');
-        if (interaction.customId === 'set_categories') input.setLabel('Category IDs (comma)');
-        if (interaction.customId === 'set_cmd') { input.setLabel('Claim Command'); input.setPlaceholder('.claim'); }
+        if (interaction.customId.startsWith('set_token_')) input.setLabel('Discord Token');
+        if (interaction.customId.startsWith('set_guilds_')) input.setLabel('Server IDs (comma)');
+        if (interaction.customId.startsWith('set_categories_')) input.setLabel('Category IDs (comma)');
+        if (interaction.customId.startsWith('set_cmd_')) { input.setLabel('Claim Command'); input.setPlaceholder('.claim'); }
 
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
@@ -466,14 +471,22 @@ bot.on('interactionCreate', async interaction => {
 
     if (interaction.isModalSubmit()) {
         const value = interaction.fields.getTextInputValue('value');
-        const field = interaction.customId.replace('modal_set_', '');
+        const customId = interaction.customId.replace('modal_', '');
+        const userId = customId.split('_').pop();
+        const field = customId.replace(`_${userId}`, '').replace('set_', '');
+        
+        if (interaction.user.id !== userId) {
+            return interaction.reply({ content: '❌ This is not your panel', ephemeral: true });
+        }
         
         if (field === 'token') {
             await interaction.deferReply({ ephemeral: true });
             const validation = await validateToken(value);
             
             if (validation.valid) {
-                db.prepare('UPDATE users SET token = ? WHERE user_id = ?').run(value, interaction.user.id);
+                db.prepare('UPDATE users SET token = ? WHERE user_id = ?').run(value, userId);
+                const sb = activeSelfbots.get(userId);
+                if (sb) sb.config.token = value;
                 await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Valid Token').setDescription(`Logged in as **${validation.user.tag}**`).setColor(0x00FF00)] });
             } else {
                 await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('❌ Invalid Token').setDescription(validation.error).setColor(0xFF0000)] });
@@ -482,22 +495,18 @@ bot.on('interactionCreate', async interaction => {
         }
         
         const map = { guilds: 'guild_ids', categories: 'category_ids', cmd: 'claim_cmd' };
-        if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, interaction.user.id);
+        if (map[field]) db.prepare(`UPDATE users SET ${map[field]} = ? WHERE user_id = ?`).run(value, userId);
         
-        // Update the selfbot instance if it exists
-        const sb = activeSelfbots.get(interaction.user.id);
+        const sb = activeSelfbots.get(userId);
         if (sb) {
-            if (field === 'guilds') {
-                sb.guildIds = value.split(',').map(g => g.trim()).filter(g => g);
-            } else if (field === 'categories') {
-                sb.categoryIds = value.split(',').map(c => c.trim()).filter(c => c);
-            }
+            if (field === 'guilds') sb.guildIds = value.split(',').map(g => g.trim()).filter(g => g);
+            else if (field === 'categories') sb.categoryIds = value.split(',').map(c => c.trim()).filter(c => c);
+            else if (field === 'cmd') sb.config.claim_cmd = value;
         }
         
-        // Edit the manage panel in place for guilds and categories
-        if (field === 'guilds' || field === 'categories') {
+        if (field === 'guilds' || field === 'categories' || field === 'cmd') {
             await interaction.deferUpdate();
-            const data = await buildManageEmbed(interaction.user.id);
+            const data = await buildManageEmbed(userId);
             await interaction.editReply(data);
         } else {
             await interaction.reply({ content: '✅ Saved', ephemeral: true });
